@@ -1,0 +1,7 @@
+# Ignore all .nc files
+*
+# Ignore specific paths
+!*.py
+!*.sh
+!*.f90
+!*.c
