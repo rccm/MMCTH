@@ -127,10 +127,9 @@ def vacuum_database(conn):
     cursor.execute('VACUUM')
     conn.commit()
 
-def main_parrallel():
-    year = '2016'
-
-    list_filepath = f'/data/keeling/a/gzhao1/f/Database/MOD21KM_{year}.list'  
+def main_parallel(year):
+    
+    list_filepath = f'/data/keeling/a/gzhao1/f/Database/mod021km_{year}.list'  
 
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -167,4 +166,8 @@ def main_parrallel():
             print("Error! cannot create the database connection.")
 
 if __name__ == "__main__":
-    main_parrallel()
+    if len(sys.argv) < 2:
+        print("Please provide the year as an argument.")
+        sys.exit(1)
+    year = sys.argv[1]   
+    main_parallel(year) 

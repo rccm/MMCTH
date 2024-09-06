@@ -82,8 +82,8 @@ def fetch_and_process_group(inputfile_list):
     print(f"Process {process_class.__name__} took {duration:.2f} seconds to run.")
 
 def main():
-    date = '2002-12-03'
-    database_path = "/data/keeling/a/gzhao1/f/Database/inputfiles_2002.sqlite"
+    date = '2016-12-03'
+    database_path = "/data/keeling/a/gzhao1/f/Database/inputfiles_2016.sqlite"
     conn = create_connection(database_path)
     if conn is None:
         logger.error("Error! cannot create the database connection.")

@@ -124,7 +124,58 @@ class MODISMISRProcessor:
             self.logger.error(f"Error applying valid indices: {e}")
             return None
 
-    def mm_process(self):
+
+    def mm_process_modis_only(self):
+        mod_lat, mod_lon, mod_landsea, mod_vza = self.process_mod03()
+        if mod_lat is None or mod_lon is None or mod_landsea is None:
+            self.logger.error("Error retrieving MODIS Lat, Lon, or Landsea mask")
+            return None
+
+        misr_lat, misr_lon = self.get_misr_geo()
+        if misr_lat is None or misr_lon is None:
+            self.logger.error("Error retrieving MISR Lat, Lon")
+            return None
+
+        misr_mod_swath = self.misr_to_modis(misr_lat, misr_lon, mod_lat, mod_lon, misr_lat)
+        if misr_mod_swath is None:
+            self.logger.error("Error finding MISR Swath over MODIS grid")
+            return None
+        
+        valid_rows, valid_cols = self.cutoff_misr_swath(misr_mod_swath)
+        if valid_rows is None or valid_cols is None:
+            self.logger.error("Error cutting off invalid parts of MISR swath")
+            return None
+ 
+        mod_lat_misrswath = self.apply_valid_indices(mod_lat, valid_rows, valid_cols)
+        mod_lon_misrswath = self.apply_valid_indices(mod_lon, valid_rows, valid_cols)
+        if mod_lat_misrswath is None or mod_lon_misrswath is None:
+            self.logger.error("Error applying valid indices to MODIS swath")
+            return None
+
+        mod06_product = self.process_mod06()
+        if mod06_product:
+            mod06_misrswath = [self.apply_valid_indices(mod06_product[key], valid_rows, valid_cols) for key in mod06_product]
+            mod06_misrswath_dict = {key: value for key, value in zip(mod06_product.keys(), mod06_misrswath)}
+
+        else:
+            self.logger.error("Error retrieving MOD06 data")
+            return None
+
+        bands_BT = self.process_mod21()
+        bands_BT_misrswath = [self.apply_valid_indices(bands_BT[key], valid_rows, valid_cols) for key in bands_BT]
+        bands_BT_misrswath_dict = {key: value for key, value in zip(bands_BT.keys(), bands_BT_misrswath)}
+
+        mod_geo_misrswath = {
+            'lat': self.apply_valid_indices(mod_vza, valid_rows, valid_cols),
+            'lon': self.apply_valid_indices(mod_vza, valid_rows, valid_cols),
+            'landsea': self.apply_valid_indices(mod_landsea, valid_rows, valid_cols),
+            'vza': self.apply_valid_indices(mod_vza, valid_rows, valid_cols)
+        }
+
+        return bands_BT_misrswath_dict, mod_geo_misrswath, mod06_misrswath_dict
+                
+
+    def mm_process(self, process_misr_cth=True, process_mod06_cth=True ):
 
         mod_lat, mod_lon, mod_landsea, mod_vza = self.process_mod03()
         if mod_lat is None or mod_lon is None or mod_landsea is None:
@@ -153,36 +204,60 @@ class MODISMISRProcessor:
             self.logger.error("Error applying valid indices to MODIS swath")
             return None
         
-        misr_cth,misr_cth_qa = self.get_misr_cth()
-        if misr_cth is None:
-            self.logger.error("Error retrieving MISR cloud top height data")
-            return None
-        
-        misr_cth_modisswath = self.misr_to_modis(misr_lat, misr_lon, mod_lat_misrswath, mod_lon_misrswath, misr_cth)
-       
-       
-        mod06_product = self.process_mod06()
-        if mod06_product:
-            mod06_misrswath = [self.apply_valid_indices(mod06_product[key], valid_rows, valid_cols) for key in mod06_product]
-            mod06_misrswath_dict = {key: value for key, value in zip(mod06_product.keys(), mod06_misrswath)}
-
-        else:
-            self.logger.error("Error retrieving MOD06 data")
-            return None
-
-
-        bands_BT = self.process_mod21()
-        bands_BT_misrswath = [self.apply_valid_indices(bands_BT[key], valid_rows, valid_cols) for key in bands_BT]
-        bands_BT_misrswath_dict = {key: value for key, value in zip(bands_BT.keys(), bands_BT_misrswath)}
-
         mod_geo_misrswath = {
             'lat': self.apply_valid_indices(mod_vza, valid_rows, valid_cols),
             'lon': self.apply_valid_indices(mod_vza, valid_rows, valid_cols),
             'landsea': self.apply_valid_indices(mod_landsea, valid_rows, valid_cols),
             'vza': self.apply_valid_indices(mod_vza, valid_rows, valid_cols)
         }
+        
+        misr_cth_dict = None
+        mod06_misrswath_dict = None
+        bands_BT_misrswath_dict = None
 
-        return bands_BT_misrswath_dict, misr_cth_modisswath, mod_geo_misrswath, mod06_misrswath_dict
+        if process_mod06_cth and process_misr_cth:
+            bands_BT = self.process_mod21()
+            bands_BT_misrswath = [self.apply_valid_indices(bands_BT[key], valid_rows, valid_cols) for key in bands_BT]
+            bands_BT_misrswath_dict = {key: value for key, value in zip(bands_BT.keys(), bands_BT_misrswath)}
+            mod06_product = self.process_mod06()
+            if mod06_product:
+                mod06_misrswath = [self.apply_valid_indices(mod06_product[key], valid_rows, valid_cols) for key in mod06_product]
+                mod06_misrswath_dict = {key: value for key, value in zip(mod06_product.keys(), mod06_misrswath)}
+            else:
+                self.logger.error("Error retrieving MOD06 data")
+                return None        
+            misr_cth,misr_cth_qa = self.get_misr_cth()
+            if misr_cth is None:
+                self.logger.error("Error retrieving MISR cloud top height data")
+                return None
+            misr_cth_modisswath = self.misr_to_modis(misr_lat, misr_lon, mod_lat_misrswath, mod_lon_misrswath, misr_cth)
+            misr_cth_modisswath_qa = self.misr_to_modis(misr_lat, misr_lon, mod_lat_misrswath, mod_lon_misrswath, misr_cth_qa)
+            misr_cth_dict = {
+                 'misrcth': misr_cth_modisswath,
+                 'misrcth_qa': misr_cth_modisswath_qa,
+            }
+            return bands_BT_misrswath_dict, misr_cth_dict, mod_geo_misrswath, mod06_misrswath_dict
+        elif not process_mod06_cth and process_misr_cth: 
+            misr_cth,misr_cth_qa = self.get_misr_cth()
+            if misr_cth is None:
+                self.logger.error("Error retrieving MISR cloud top height data")
+                return None
+            misr_cth_modisswath = self.misr_to_modis(misr_lat, misr_lon, mod_lat_misrswath, mod_lon_misrswath, misr_cth)
+            misr_cth_modisswath_qa = self.misr_to_modis(misr_lat, misr_lon, mod_lat_misrswath, mod_lon_misrswath, misr_cth_qa)
+            misr_cth_dict = {
+                 'misr_cth': misr_cth_modisswath,
+                 'misr_cth_qa': misr_cth_modisswath_qa,
+            }
+            return misr_cth_modisswath, mod_geo_misrswath 
+        elif not process_misr_cth and process_mod06_cth : 
+            mod06_product = self.process_mod06()
+            if mod06_product:
+                mod06_misrswath = [self.apply_valid_indices(mod06_product[key], valid_rows, valid_cols) for key in mod06_product]
+                mod06_misrswath_dict = {key: value for key, value in zip(mod06_product.keys(), mod06_misrswath)}
+            else:
+                self.logger.error("Error retrieving MOD06 data")
+                return None                 
+            return  mod06_misrswath_dict, mod_geo_misrswath
                 
 
 class ERA5Processor:

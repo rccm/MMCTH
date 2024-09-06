@@ -12,7 +12,8 @@ class MODL1Granule():
         if os.path.isfile(self.fullpath):
             self.hdf_file = SD(self.fullpath)
         else:
-            raise FileNotFoundError("File not found: " + self.file_path)
+            print(f'Corrupted file: {self.fullpath}')    
+            raise FileNotFoundError("File not found: " + self.fullpath)
     def get_id(self):
         match = re.search(r"\.A(\d{7})\.(\d{4})\.", self.fullpath)  # Use self.fullpath to extract date/time
         if match:
