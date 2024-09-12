@@ -11,7 +11,7 @@ import pandas as pd
 import xarray as xr
 
 class MODISMISRProcessor:
-    '''    '''
+    '''  Process MODIS data  and MISR TC_Cloud data if avaible    '''
     def __init__(self, input_files, logger):
         if len(input_files) != 9:
             logger.error("Error! The input file list is WRONG")
@@ -59,6 +59,7 @@ class MODISMISRProcessor:
         except Exception as e:
             self.logger.error(f"Error processing MOD06: {self.mod06_file} {e}")
             return None
+        
     def process_mod03(self):
         try:
             self.logger.debug("Processing MOD03 data")
@@ -124,7 +125,6 @@ class MODISMISRProcessor:
             self.logger.error(f"Error applying valid indices: {e}")
             return None
 
-
     def mm_process_modis_only(self):
         mod_lat, mod_lon, mod_landsea, mod_vza = self.process_mod03()
         if mod_lat is None or mod_lon is None or mod_landsea is None:
@@ -174,7 +174,6 @@ class MODISMISRProcessor:
 
         return bands_BT_misrswath_dict, mod_geo_misrswath, mod06_misrswath_dict
                 
-
     def mm_process(self, process_misr_cth=True, process_mod06_cth=True ):
 
         mod_lat, mod_lon, mod_landsea, mod_vza = self.process_mod03()
@@ -183,16 +182,17 @@ class MODISMISRProcessor:
             return None
 
         misr_lat, misr_lon = self.get_misr_geo()
+    
         if misr_lat is None or misr_lon is None:
             self.logger.error("Error retrieving MISR Lat, Lon")
             return None
-
+        # The reprojection code requires the padding values np.nan instead of any acually numbers like -999
         misr_mod_swath = self.misr_to_modis(misr_lat, misr_lon, mod_lat, mod_lon, misr_lat)
-
+        print(misr_mod_swath[misr_mod_swath>-990])
         if misr_mod_swath is None:
             self.logger.error("Error finding MISR Swath over MODIS grid")
             return None
-
+        
         valid_rows, valid_cols = self.cutoff_misr_swath(misr_mod_swath)
         if valid_rows is None or valid_cols is None:
             self.logger.error("Error cutting off invalid parts of MISR swath")
@@ -474,10 +474,14 @@ class ERA5Processor:
         return
 
     def interpolate_to_pressure_levels_direct(self, variable):
+        """
+        Linearly interpolate the data to different pressure levels 
+        Parameters:
+            **variables: The variables to save, provided as keyword arguments.
+        """
         pchip_interpolator = PchipInterpolator((np.log(self.era5_P_levels)), variable,axis=0,extrapolate=True)
         return pchip_interpolator(np.log(self.P_levels_gt_1mb))
-         
-        
+              
     def load_std_atmos_profile(self):
         netcdf_file = self.profile_file
         month = self.month
@@ -576,6 +580,7 @@ class ERA5Processor:
  
         return result
 
+
 class MainProcessor:
     def __init__(self, inputfile_list, logger):
         print(inputfile_list)
@@ -590,16 +595,36 @@ class MainProcessor:
 
     def run_process(self):
         # try:
+        #  define output variables
+            mm_invalid = -9999
+            misr_cth_invalid = -500
             self.logger.debug("Running the MISR/MODIS data processing pipeline")
             bands_BT, misr_cth, mod_geo, mod06 = self.mm_processor.mm_process()
             if  bands_BT is None:
-                self.logger.error(f" Processing MISR/MODIS Problems: {e}")
+                self.logger.error(f" Processing MISR/MODIS Problems")
+
             era5_lats, era5_lons = self.era5_processor.era5_lat_lon()
             era5_variables = self.era5_processor.era5_process()
             self.logger.debug("ERA5 processing completed successfully")
             era5_variables_misrswath = self.era5_processor.map_era5_to_modis(mod_geo['lat'], mod_geo['lon'], era5_lats, era5_lons, era5_variables)
             
-             
+
+            # define output variables
+            mm_cth = np.full_like(misr_cth, fill_value=mm_invalid)
+            mm_ctp = np.full_like(misr_cth, fill_value=mm_invalid, dtype=float)
+            mm_emissivity = np.full_like(misr_cth, fill_value=mm_invalid, dtype=float)
+            mm_opt = np.full_like(misr_cth, fill_value=mm_invalid, dtype=float) 
+            multi_layer_flag  = np.full_like(misr_cth, fill_value=mm_invalid, dtype=np.int8) 
+            
+            if np.all(misr_cth < misr_cth_invalid):
+                #
+                pass
+                #save mod06
+                 
+            else:
+                pass
+                # pixel level processing 
+                  
             output_dir = '/data/keeling/a/gzhao1/f/mmcth/output/'
             outputfile_name = f'{output_dir}MODMISR_L2_CP_{self.mm_processor.id}_O{self.mm_processor.orbit}_v01.nc'
             print(outputfile_name)
@@ -607,6 +632,39 @@ class MainProcessor:
             mmcth.save(bands_BT,misr_cth, mod_geo, mod06,era5_variables_misrswath)
             self.logger.debug("Output file saved successfully")           
 
+'''
+# Assuming modis_heights, misr_heights, and cloud_phase are 2D arrays
+height_diff = np.abs(modis_heights - misr_heights)
+condition = (height_diff > 1000) & (cloud_phase == 0)
+
+# Get the indices of the selected pixels
+selected_pixels = np.where(condition)
+
+# Extract data for the selected pixels
+selected_wprof = wprof[:, selected_pixels]     # Water vapor profile for selected pixels
+selected_tprof = tprof[:, selected_pixels]     # Temperature profile for selected pixels
+selected_psfc = psfc[selected_pixels]          # Surface pressure for selected pixels
+selected_pmsl = pmsl[selected_pixels]          # Sea-level pressure for selected pixels
+selected_surftmp = surftmp[selected_pixels]    # Surface temperature for selected pixels
+selected_view = view[selected_pixels]          # Viewing angles for selected pixels
+selected_tcold = tcold[:, selected_pixels]     # Cold temperatures
+selected_bias = bias[:, selected_pixels]       # Bias
+selected_met_date = met_date[:, selected_pixels] # Meteorological date
+selected_rlat = rlat[selected_pixels]          # Latitude
+selected_rlon = rlon[selected_pixels]          # Longitude
+selected_landsea = landsea[selected_pixels]    # Land-sea mask
+selected_misr_ctp = misr_ctp[selected_pixels] 
+
+
+# Initialize empty 2D arrays for the results
+output_ctp = np.full((rows, cols), np.nan)  # Cloud Top Pressure
+output_eca = np.full((rows, cols), np.nan)  # Effective Cloud Amount
+
+# Assign the results from the selected pixels back to their original positions
+output_ctp[selected_pixels] = ctp
+output_eca[selected_pixels] = eca
+
+'''
         # except Exception as e:
         #     self.logger.error(f" Main Processing Problems: {e}")
         #     return None

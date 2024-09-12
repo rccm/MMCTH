@@ -9,10 +9,9 @@ def merge_netcdf(file1, file2, output_file):
         ds1 = xr.open_dataset(file1)
         ds2 = xr.open_dataset(file2)
 
-        # Merge the datasets
+ 
         merged_ds = xr.merge([ds1, ds2])
 
-        # Save the merged dataset to a new NetCDF file
         merged_ds.to_netcdf(output_file)
 
         print(f"Files successfully merged into {output_file}")

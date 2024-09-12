@@ -362,7 +362,7 @@ write(*,*) rclr(k), robs(k)
 end subroutine
 
 subroutine co2cld_onepixel_misr(wprof, tprof, psfc,pmsl, surftmp, view, tcold, ctp, &
-              eca, met_date, rlat, rlon, landsea, bias, misr_ctp)
+              eca, jday, rlat, rlon, landsea, bias, misr_ctp)
 
   use transmission, only: tran_modisd101
   use surfemis, only: getiremis, assign_eco_emis
@@ -382,10 +382,11 @@ subroutine co2cld_onepixel_misr(wprof, tprof, psfc,pmsl, surftmp, view, tcold, c
 !f2py intent(in) met_date, landsea
 !f2py intent(out) ctp, eca
   real misr_ctp
+  integer jday
 !f2py intent(in) misr_ctp
 
   real z(plev), ozone(plev), zs, taup(plev, nb_wavelen), tmin, ptrp
-  integer met_year, met_day, met_month, jday, ltrp, lmin
+  integer met_year, met_day, met_month, ltrp, lmin
 
   real freqemis(nb_wavelen), emis(nb_wavelen), rho(nb_wavelen)
   real emis_out, rho_out, sfc_emis(ntbct)
@@ -412,13 +413,6 @@ subroutine co2cld_onepixel_misr(wprof, tprof, psfc,pmsl, surftmp, view, tcold, c
   met_month = met_date(2)
   met_year = met_date(1)
   met_day = met_date(3)
-
-! c     Calculate day-of-year.
-  if( mod(met_year,4) .eq. 0 ) then
-    jday = leap_doy(met_month) + met_day
-  else
-    jday = std_doy(met_month) + met_day
-  end if
 
   call clozo101(rlat, met_month, ozone)
 
@@ -666,4 +660,57 @@ subroutine co2cld_onepixel_misr(wprof, tprof, psfc,pmsl, surftmp, view, tcold, c
 
   end do
       write(*,*) rclr(k), robs(k)
+end subroutine
+
+subroutine process_selected_pixels(wprof, tprof, psfc, pmsl, surftmp, view, tcold, ctp, &
+                                   eca, rlat, rlon, landsea, bias, misr_ctp, npix,jday)
+
+  ! Input arrays for selected pixels
+  use co2, only: nbct, plev, leap_doy, std_doy, pp, nb_wavelen, &
+                ntbct, mbnds, jdet, freq, kch, nsct, &
+                rmin, emadj, badvalue, emisrw
+  integer, intent(in) :: npix                         ! Number of selected pixels
+  real, intent(in) :: wprof(plev, npix), tprof(plev, npix)
+  real, intent(in) :: psfc(npix), pmsl(npix)
+  real, intent(in) :: surftmp(npix), view(npix)
+  real, intent(in) :: tcold(nbct, npix), bias(nbct, npix)
+  real, intent(in) :: rlat(npix), rlon(npix)
+  real, intent(in) :: landsea(npix), misr_ctp(npix)
+  integer, intent(in) :: jday ! doy of year
+
+  ! Output arrays
+  real, intent(out) :: ctp(nsct, npix)
+  real, intent(out) :: eca(2, npix)
+
+  ! Local variables for a single pixel
+  real :: wprof_pix(plev), tprof_pix(plev), psfc_pix, pmsl_pix, surftmp_pix, view_pix, tcold_pix(nbct), bias_pix(nbct)
+  real :: met_date_pix(4), rlat_pix, rlon_pix, landsea_pix, misr_ctp_pix
+  real :: ctp_pix(nsct), eca_pix(2)
+  integer :: pix
+
+  ! Loop over selected pixels
+  do pix = 1, npix
+    ! Extract the data for the current pixel
+    wprof_pix = wprof(:, pix)
+    tprof_pix = tprof(:, pix)
+    psfc_pix = psfc(pix)
+    pmsl_pix = pmsl(pix)
+    surftmp_pix = surftmp(pix)
+    view_pix = view(pix)
+    tcold_pix = tcold(:, pix)
+    bias_pix = bias(:, pix)
+    rlat_pix = rlat(pix)
+    rlon_pix = rlon(pix)
+    landsea_pix = landsea(pix)
+    misr_ctp_pix = misr_ctp(pix)
+
+    ! Call the original subroutine for the current pixel
+    call co2cld_onepixel_misr(wprof_pix, tprof_pix, psfc_pix, pmsl_pix, surftmp_pix, view_pix, tcold_pix, ctp_pix, &
+                              eca_pix, jday, rlat_pix, rlon_pix, landsea_pix, bias_pix, misr_ctp_pix)
+
+    ! Store the result for the current pixel
+    ctp(:, pix) = ctp_pix
+    eca(:, pix) = eca_pix
+  end do
+
 end subroutine

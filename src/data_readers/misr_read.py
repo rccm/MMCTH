@@ -160,9 +160,9 @@ class MISRGranule:
         cth = self.read_data('CloudTopHeight')
         start_blk, end_blk = self.get_block_range()
         if start_blk > 1:
-            cth[0:start_blk+1,:,:] = -777
+            cth[0:start_blk+1,:,:] = -777  #including the starting block
         if end_blk < 180:
-            cth[end_blk:,:,:] = -777
+            cth[end_blk:,:,:] = -777 #including the ending block
         if  upscale_factor >1: 
             cth = np.repeat(np.repeat(cth, upscale_factor, axis=1), upscale_factor, axis=2)
         if quality_flag:

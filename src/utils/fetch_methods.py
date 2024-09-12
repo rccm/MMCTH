@@ -31,7 +31,6 @@ def fetch_files_by_orbit(conn, orbit_number,groud_id_only = False):
     return files_by_group
 
 def fetch_files_by_date(conn, date):
-
     date_time = date + ' 00:00:00'
     cursor = conn.cursor()
     cursor.execute('''
@@ -75,12 +74,23 @@ def fetch_files_by_year(conn, year):
             files_by_group[group_id] = []
         files_by_group[group_id].append(file_path)
     return files_by_group
+
 def process_groups(groups):
     for group_id, file_paths in groups.items():
         print(f"Processing group {group_id}")
-         
+
+def fetch_all_groups(conn):
+    """ Fetch all distinct group IDs in the database """
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT DISTINCT group_id FROM files
+    ''')
+    groups = cursor.fetchall()
+    return [group[0] for group in groups]
+
 
 if __name__ == "__main__":
+    
     database_path = "/data/keeling/a/gzhao1/f/mmcth/lists/inputfiles.sqlite"
     conn = create_connection(database_path)
     if conn is None:
