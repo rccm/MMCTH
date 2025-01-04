@@ -86,13 +86,15 @@ def main():
     parser.add_argument('-y', '--year', type=int, required=True, help='Year to process (e.g., 2016)')
     parser.add_argument('-m', '--month', type=int, help='Month to process (optional, e.g., 3 for March)')
     parser.add_argument('-d', '--date', type=str, help='Day to process in MM-DD format (optional)')
-    parser.add_argument('-o', '--orbit', type=str, help='Day to process in MM-DD format (optional)')
+    parser.add_argument('-o', '--orbit', type=str, help='Orbit to process (optional)')
+    parser.add_argument('-i', '--modisid', type=str, help='MODIS ID i.e. A2001.1234 (optional)')
     
     args = parser.parse_args()
     year = args.year
     month = args.month
     date = args.date
     orbit = args.orbit
+    modisid = args.modisid
 
     # Construct database path
     db_path = f"/data/keeling/a/gzhao1/f/Database/inputfiles_{year}.sqlite"
@@ -113,8 +115,10 @@ def main():
         logger.info(f'Fetching files for {year}-{month:02d}')
         groups = fetch_methods.fetch_files_by_month(conn, year, month)
     elif orbit:
-        logger.info(f'Fetching files for {year}-{month:02d}')
+        logger.info(f'Fetching files for {orbit}')
         groups = fetch_methods.fetch_files_by_orbit(conn, orbit)
+    elif modisid:
+        groups = fetch_methods.fetch_files_by_modisid(conn, modisid) 
     else:
         # Default: process entire year
         logger.info(f'Fetching files for the entire year {year}')

@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=gpu_job         # Job name
-#SBATCH --partition=gpu            # Partition (queue) to submit to
+#SBATCH --partition=gpu,sesempi            # Partition (queue) to submit to
 #SBATCH --gres=gpu:1               # Request 1 GPU
 #SBATCH --nodes=1                  # Request 1 node
 #SBATCH --ntasks=1                 # Run 1 task (process)

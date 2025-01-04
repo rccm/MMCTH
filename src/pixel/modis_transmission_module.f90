@@ -84,7 +84,7 @@ module transmission
   character*3 comp(nk)
 
   integer iuc(nk), lengcf(nk)
-  character*27 pcfval(nk)
+  character*68 pcfval(nk)
   integer i, j, jj, k, l, ikrec, krec, krecx, ksat
   integer create_date, ios, version, init
   integer wco_create_date
@@ -113,11 +113,11 @@ module transmission
   save
 
 !c ... Data statements
-	data pcfval/'modisdet.dry.101.lit_end.v3', &
-  'modisdet.ozo.101.lit_end.v3',           &
-  'modisdet.wts.101.lit_end.v3',           &
-  'modisdet.wtl.101.lit_end.v3',           &
-  'modisdet.wco.101.lit_end.v3'/
+	data pcfval/'/data/keeling/a/gzhao1/f/mmcth/src/pixel/modisdet.dry.101.lit_end.v3', &
+  '/data/keeling/a/gzhao1/f/mmcth/src/pixel/modisdet.ozo.101.lit_end.v3',           &
+  '/data/keeling/a/gzhao1/f/mmcth/src/pixel/modisdet.wts.101.lit_end.v3',           &
+  '/data/keeling/a/gzhao1/f/mmcth/src/pixel/modisdet.wtl.101.lit_end.v3',           &
+  '/data/keeling/a/gzhao1/f/mmcth/src/pixel/modisdet.wco.101.lit_end.v3'/
 
 
   data lengcf/lencdb, lencob, lencsb, lenclb, lenccb/

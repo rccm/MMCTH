@@ -360,9 +360,10 @@ subroutine co2cld_onepixel(wprof, tprof, psfc,pmsl, surftmp, view, tcold, ctp, &
 write(*,*) rclr(k), robs(k)
 
 end subroutine
-
-subroutine co2cld_onepixel_misr(wprof, tprof, psfc,pmsl, surftmp, view, tcold, ctp, &
-              eca, jday, rlat, rlon, landsea, bias, misr_ctp)
+!!!!!!!!! 
+!!!!!!!!!
+subroutine co2cld_onepixel_misr(wprof, tprof, psfc,pmsl, surftmp, view, tcold, &
+               jday, rlat, rlon, landsea, misr_ctp,ctp,eca)
 
   use transmission, only: tran_modisd101
   use surfemis, only: getiremis, assign_eco_emis
@@ -374,7 +375,7 @@ subroutine co2cld_onepixel_misr(wprof, tprof, psfc,pmsl, surftmp, view, tcold, c
   implicit none
   save
 
-  real tcold(nbct), wprof(plev), tprof(plev), surftmp, bias(nbct)
+  real tcold(nbct), wprof(plev), tprof(plev), surftmp
 !f2py intent(in) tcold, wprof, tprof, surftmp, bias
   real view, ctp(nsct), eca(2), rlat, rlon, pmsl, psfc
 !f2py intent(in) view,rlat, rlon, pmsl, psfc
@@ -578,7 +579,7 @@ subroutine co2cld_onepixel_misr(wprof, tprof, psfc,pmsl, surftmp, view, tcold, c
 ! c         Compute TOA clear radiance from input profiles.
     rclr(k) = fm_modrad_emis(tprof(imisr),1.0,misr_ctp,pp,tprof,taup(1,k),&
                              mbnds(k),imisr)
-    rclr(k) = rclr(k) - bias(k) !clear is now 'reference' which includes misr cloud contribution
+    ! rclr(k) = rclr(k) - bias(k) !clear is now 'reference' which includes misr cloud contribution
     delr(k) = robs(k) - rclr(k)
 ! c         Compute components of RHS
     sum = 0.0
@@ -662,34 +663,38 @@ subroutine co2cld_onepixel_misr(wprof, tprof, psfc,pmsl, surftmp, view, tcold, c
       write(*,*) rclr(k), robs(k)
 end subroutine
 
-subroutine process_selected_pixels(wprof, tprof, psfc, pmsl, surftmp, view, tcold, ctp, &
-                                   eca, rlat, rlon, landsea, bias, misr_ctp, npix,jday)
-
+subroutine process_selected_pixels(wprof, tprof, psfc, pmsl, surftmp, view, tcold, &
+                                      rlat, rlon, landsea, misr_ctp, jday, npix, ctp, eca)
+ #zprof                                      
+  
   ! Input arrays for selected pixels
   use co2, only: nbct, plev, leap_doy, std_doy, pp, nb_wavelen, &
                 ntbct, mbnds, jdet, freq, kch, nsct, &
-                rmin, emadj, badvalue, emisrw
+                rmin, emadj, badvalue, emisrw                
   integer, intent(in) :: npix                         ! Number of selected pixels
-  real, intent(in) :: wprof(plev, npix), tprof(plev, npix)
+  real, intent(in) :: wprof(plev, npix), tprof(plev, npix) !
   real, intent(in) :: psfc(npix), pmsl(npix)
   real, intent(in) :: surftmp(npix), view(npix)
-  real, intent(in) :: tcold(nbct, npix), bias(nbct, npix)
+  real, intent(in) :: tcold(nbct, npix) 
   real, intent(in) :: rlat(npix), rlon(npix)
   real, intent(in) :: landsea(npix), misr_ctp(npix)
+
   integer, intent(in) :: jday ! doy of year
 
   ! Output arrays
-  real, intent(out) :: ctp(nsct, npix)
+  real, intent(out) :: ctp(nsct, npix), opt(nsct,npix)
   real, intent(out) :: eca(2, npix)
+  integer, intent(out) :: cflag(npix)
 
   ! Local variables for a single pixel
-  real :: wprof_pix(plev), tprof_pix(plev), psfc_pix, pmsl_pix, surftmp_pix, view_pix, tcold_pix(nbct), bias_pix(nbct)
+  real :: wprof_pix(plev), tprof_pix(plev), psfc_pix, pmsl_pix, surftmp_pix, view_pix, tcold_pix(nbct) 
   real :: met_date_pix(4), rlat_pix, rlon_pix, landsea_pix, misr_ctp_pix
   real :: ctp_pix(nsct), eca_pix(2)
   integer :: pix
 
+  ctp = -9999.9
   ! Loop over selected pixels
-  do pix = 1, npix
+  do pix = 1, 1
     ! Extract the data for the current pixel
     wprof_pix = wprof(:, pix)
     tprof_pix = tprof(:, pix)
@@ -698,19 +703,35 @@ subroutine process_selected_pixels(wprof, tprof, psfc, pmsl, surftmp, view, tcol
     surftmp_pix = surftmp(pix)
     view_pix = view(pix)
     tcold_pix = tcold(:, pix)
-    bias_pix = bias(:, pix)
     rlat_pix = rlat(pix)
     rlon_pix = rlon(pix)
     landsea_pix = landsea(pix)
     misr_ctp_pix = misr_ctp(pix)
-
+    !write(*,*) wprof_pix,tprof_pix, tprof_pix,psfc_pix,pmsl_pix,surftmp_pix,view_pix,tcold_pix,rlat_pix,rlon_pix,landsea_pix,misr_ctp_pix
     ! Call the original subroutine for the current pixel
-    call co2cld_onepixel_misr(wprof_pix, tprof_pix, psfc_pix, pmsl_pix, surftmp_pix, view_pix, tcold_pix, ctp_pix, &
-                              eca_pix, jday, rlat_pix, rlon_pix, landsea_pix, bias_pix, misr_ctp_pix)
-
+    call co2cld_onepixel_misr(wprof_pix, tprof_pix, psfc_pix, pmsl_pix, surftmp_pix, view_pix, tcold_pix, &
+                              jday, rlat_pix, rlon_pix, landsea_pix, misr_ctp_pix,ctp_pix, eca_pix)
     ! Store the result for the current pixel
+    write(*,*) 'Input values for the pixel'      
+    write(*,*) '----------------'                    
+    print *, 'wprof_pix =', wprof_pix
+    write(*,*) '----------------'                    
+    print *, 'tprof_pix =', tprof_pix
+    write(*,*) '----------------'                    
+    print *, 'psfc_pix =', psfc_pix
+    print *, 'pmsl_pix =', pmsl_pix
+    print *, 'surftmp_pix =', surftmp_pix
+    print *, 'view_pix =', view_pix
+    print *, 'tcold_pix =', tcold_pix
+    print *, 'jday =', jday
+    print *, 'rlat_pix =', rlat_pix
+    print *, 'rlon_pix =', rlon_pix
+    print *, 'landsea_pix =', landsea_pix
+    print *, 'misr_ctp_pix =', misr_ctp_pix
+    print *, 'ctp_pix =', ctp_pix
+    print *, 'eca_pix =', eca_pix    
+    write(*,*) '---------------------'                          
     ctp(:, pix) = ctp_pix
     eca(:, pix) = eca_pix
   end do
-
 end subroutine

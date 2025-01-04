@@ -30,12 +30,12 @@ def log_checked_file(file_path, log_file):
 
 
 def log_unreadable_file(file_path, rank):
-    unreadable_log_file = f'unreadable_mod06_{rank}.txt'
+    unreadable_log_file = f'unreadable_mod21_{rank}.txt'
     with open(unreadable_log_file, 'a') as f:
         f.write(f"{file_path}\n")
 
 # Main process
-file_to_check = '/data/keeling/a/gzhao1/f/Database/mod06_full.list'
+file_to_check = '/data/keeling/a/gzhao1/f/Database/mod021km_2022.list'
 log_file = './checked_files.log'
 
 # Initialize MPI
@@ -57,7 +57,7 @@ file_chunk = comm.scatter(file_chunks, root=0)
 for file_path in file_chunk:
     result = check_hdf4_readability(file_path)
     log_checked_file(file_path, log_file)  # Log the file as soon as it's checked
-    # if result:
-    #     log_unreadable_file(result, rank)  # Log unreadable file immediately
+    if result:
+        log_unreadable_file(result, rank)  # Log unreadable file immediately
 
 # No need to gather unreadable files at rank 0

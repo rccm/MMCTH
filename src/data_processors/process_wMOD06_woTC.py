@@ -1,7 +1,7 @@
 from .process_main import MODISMISRProcessor,ERA5Processor
 import os
 from .netcdf_saver import NetCDFSaver
-
+import numpy as np
 class WMOD06WoTC:
     '''Process MODIS '''
     def __init__(self, inputfile_list, logger):
@@ -22,6 +22,10 @@ class WMOD06WoTC:
             era5_variables_misrswath = self.era5_processor.map_era5_to_modis(mod_geo['lat'], mod_geo['lon'], era5_lats, era5_lons, era5_variables)
             output_dir = '/data/keeling/a/gzhao1/f/mmcth/output/'
             outputfile_name = f'{output_dir}MODMISR_L2_CP_{self.mm_processor.id}_O{self.mm_processor.orbit}_v01.nc'
+
+            mm_variables = np.copy(mod06)
+            mm_variables['cflag'] = np.zeros_like(mod06['cth']) + self.cflag_modis
+            self.save_pixels(mm_variables,mod06, mod_geo, misr_cth, era5_variables_misrswath, outputfile_name)
             mmcth = NetCDFSaver(outputfile_name, self.logger)
             mmcth.save(None,None,mod_geo,mod06,era5_variables_misrswath)
             # self.logger.debug("Output file saved successfully")           

@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 
 # List of years to process
-years=("2005" "2006" "2007" "2008" "2009" "2010" "2011" "2012" "2013" "2014" "2015")  # Add all the years you want to process
-
+years=("2017" "2018" "2019" "2020" "2021")  # Add all the years you want to process
+years=("2021" "2022") 
 # Loop through each year and submit a job
 for year in "${years[@]}"; do
 
     sbatch <<EOF
 #!/usr/bin/env bash
-#SBATCH -n 400
+#SBATCH -n 350
 #SBATCH --constraint=sfp
 #SBATCH -p sesebig
 #SBATCH --time=48:00:00
-#SBATCH --mem=80gb
+#SBATCH --mem=130gb
 #SBATCH --job-name="DB_Populate_$year"
 #SBATCH --output="populate_$year.out"
 #SBATCH --error="populate_$year.err"
@@ -23,7 +23,7 @@ for year in "${years[@]}"; do
 module load gnu/openmpi-4.1.2-gnu-9.3.0  
 cd /data/keeling/a/gzhao1/f/mmcth/src/database/
 
-mpirun -n 400 python populate_db.py $year
+mpirun -n 350 python populate_db.py $year
 EOF
 
 done

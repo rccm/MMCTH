@@ -181,6 +181,7 @@ class MODL1Granule():
             return data_corrected_total.reshape((num_bands, num_horizontal, num_vertical))
         else:
             return data_corrected_total.reshape((num_bands, num_horizontal, num_vertical)) 
+        
     def get_band_data(self, band_name, data_type):
         """
         Retrieve radiance or reflectance data for a specified band.
@@ -369,7 +370,7 @@ class MOD06Granule():
     def __init__(self, mod_l1b_fullpath):
         self.fullpath = mod_l1b_fullpath  # Use the passed full path
     
-    def get_data(self, fieldname,upscale_1km = True, scale_factor_flag = True):
+    def get_data(self, fieldname,upscale_1km = False, scale_factor_flag = True):
 
         hdf_file = SD(self.fullpath)
         data = hdf_file.select(fieldname)
@@ -382,24 +383,28 @@ class MOD06Granule():
             data_value = (data_value - offset) *scale_factor 
         else:
             data_value = data.get()
+
         along_sampling = data.attributes()['Cell_Along_Swath_Sampling']
-        if ((upscale_1km) and  (along_sampling[-1] != 1)):
+        if upscale_1km and along_sampling[-1] != 1:
+            # Upscale the data from 5 km to 1 km by copying
+            repeat_factor = 5  # Copy each 5 km pixel 5 times to reach 1 km resolution
             target_shape = (2030, 1354)
-            across_sampling = data.attributes()['Cell_Across_Swath_Sampling']
-            def repeat_data(data, target_shape, along_factors, across_factors):
-                along_indices = np.concatenate([np.repeat(i, factor) for i, factor in enumerate(along_factors)])
-                across_indices = np.concatenate([np.repeat(i, factor) for i, factor in enumerate(across_factors)])                
-                resampled_data = data[along_indices][:, across_indices]
-                return resampled_data
-            data_value = repeat_data(data_value, target_shape, along_sampling, across_sampling)
+            # Resample the data by repeating each value in both dimensions
+            data_value = np.repeat(np.repeat(data_value, repeat_factor, axis=0), repeat_factor, axis=1)
+            current_shape = data_value.shape
+
+            if current_shape[1] < target_shape[1]:
+                # Pad the across-swath dimension to reach 1354 columns if needed
+                padding_across = target_shape[1] - current_shape[1]
+                data_value = np.pad(data_value, ((0, 0), (0, padding_across)), mode='edge')  # Pads the end by repeating values
             data_value = data_value[:target_shape[0], :target_shape[1]]
         return data_value
-    
-    def get_ctp(self,upscale_1km = True ):
-        return self.get_data('Cloud_Top_Pressure',upscale_1km = upscale_1km )    
-    
-    def get_cttemp(self,upscale_1km = True):
-        return self.get_data('Cloud_Top_Temperature',upscale_1km = upscale_1km) 
+        
+    def get_ctp(self):
+        return self.get_data('cloud_top_pressure_1km')    
+
+    def get_cttemp(self):
+        return self.get_data('cloud_top_temperature_1km') 
     
     def get_opt(self):
         return self.get_data('Cloud_Optical_Thickness')
@@ -407,16 +412,79 @@ class MOD06Granule():
     def get_cer(self):
         return self.get_data('Cloud_Effective_Radius') 
     
+    def get_ctm(self):
+        return self.get_data('cloud_top_method_1km') 
+                             
     def get_cphase(self):
+        '''
+        0: Cloud Mask unavaible, missing data
+        1: Cloud Mask Clear or Probably Clear, or Pixel Restored to clear sky
+        2: Liquid Water
+        3: Ice
+        4: Undertermined
+        '''
         return self.get_data('Cloud_Phase_Optical_Properties')    
     
+    def get_multilayer_withPH(self):
+        '''
+        0 indicates no cloud was detected, 
+        1 indicates a monolayer cloud and values
+        2–10 indicate the cumulative weight of the positive multilayer tests. 
+        '''
+
+        return self.get_data('Cloud_Multi_Layer_Flag')
+    
+    def get_multilayer_withoutPH(self, sum_flag = False):
+
+        '''
+        Use quality-assurance at 1km  to turn off the Pavolonis–Heidinger (PH) test
+        0 indicates no cloud was detected, 
+        1 indicates a monolayer cloud and values
+        2 indicates multi-layer clouds without the PH test
+
+        '''
+
+        cloud_multi_layer_flag = self.get_data('Cloud_Multi_Layer_Flag')
+        quality_assurance_1km  = self.get_data('Quality_Assurance_1km')
+        byte5 = quality_assurance_1km[:, :, 5]
+
+
+        # Create a bitmask to isolate Bits 0-3 (other multilayer tests)
+         
+        other_tests_mask = 0b00001111
+
+        other_tests_result = byte5 & other_tests_mask
+ 
+        
+        multilayer_detected = other_tests_result != 0
+
+        new_cloud_multi_layer_flag = np.copy(cloud_multi_layer_flag)
+
+        # Set pixels with multilayer detection (excluding PH test) to 2 (or another appropriate value)
+        if  sum_flag:
+            positive_tests_count = (
+                (other_tests_result & 0b0001) +
+                ((other_tests_result & 0b0010) >> 1) +
+                ((other_tests_result & 0b0100) >> 2) +
+                ((other_tests_result & 0b1000) >> 3)
+            )
+            new_cloud_multi_layer_flag = positive_tests_count  # Multilayer cloud detected
+        else:
+            new_cloud_multi_layer_flag[~multilayer_detected] = 2  # Single-layer cloud
+        # Set pixels without multilayer detection to 1 (single-layer cloud)
+        new_cloud_multi_layer_flag[~multilayer_detected] = 1  # Single-layer cloud
+        # Handle pixels where no cloud is detected using Cloud_Multi_Layer_Flag
+        no_cloud = cloud_multi_layer_flag == 0
+        new_cloud_multi_layer_flag[no_cloud] = 0  # No cloud detected
+
+        return new_cloud_multi_layer_flag
+
     def get_cth(self):
         return self.get_data('cloud_top_height_1km',scale_factor_flag=False) 
     
-    def get_emissivity(self):
-        return self.get_data('Cloud_Effective_Emissivity') 
-   
-        
+    def get_emissivity(self,upscale_1km = True):
+        return self.get_data('Cloud_Effective_Emissivity',upscale_1km = upscale_1km) 
+          
 class MOD03Granule():
     def __init__(self, mod_l1b_fullpath):
         self.fullpath = mod_l1b_fullpath  # Use the passed full path
@@ -441,9 +509,30 @@ class MOD03Granule():
         return self.get_data('Latitude',scale_factor_flag=False)
     def get_lon(self):
         return self.get_data('Longitude',scale_factor_flag=False)
-    def get_landsea_mask(self):
-        return self.get_data('Land/SeaMask',scale_factor_flag=False) 
-   
+    def get_landsea_mask(self,binary_output=True):
+        '''
+        0: Shallow ocean
+        1: Land
+        2: Coastline
+        3: Shallow inland water
+        4: Ephemeral water
+        5: Deep inland water
+        6: Moderate or continental ocean
+        7: Deep ocean
+        '''
+        landsea_mask = self.get_data('Land/SeaMask', scale_factor_flag=False)
+        if binary_output:
+            # Initialize a binary mask with default value of 0 (non-land)
+            binary_mask = np.zeros_like(landsea_mask, dtype=int)
+            
+            # Set binary values: 1 for land (value 1), 2 for coastline (value 2)
+            binary_mask[landsea_mask == 1] = 1
+            binary_mask[landsea_mask == 2] = 2
+            
+            return binary_mask
+        
+        # Return the original Land/SeaMask values if binary_output is False
+        return landsea_mask
 
 
 if __name__ == "__main__":

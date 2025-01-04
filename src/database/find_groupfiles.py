@@ -1,3 +1,7 @@
+'''
+   Group the coindident files between MISR and MODIS for each MODIS 5-minute granule
+   
+'''
 import re
 from datetime import datetime,timedelta
 import os,sys
