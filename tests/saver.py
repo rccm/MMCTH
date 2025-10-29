@@ -1,72 +1,116 @@
 # test_netcdf_saver.py
-import pytest
 import numpy as np
 import xarray as xr
 import logging
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
-from src.data_processors.netcdf_saver import NetCDFSaver
+from src.data_processors.xarray_saver import XarraySaver
+import numpy as np
+import xarray as xr
+from pathlib import Path
+import logging
 
-@pytest.fixture
-def logger():
-    logging.basicConfig(level=logging.INFO)
-    return logging.getLogger("NetCDF Test Logger")
-
-@pytest.fixture
+# ---------- sample data ----------
 def sample_data():
-    return {
-        'mm_variables': {
-            'cth': np.random.randint(0, 20000, size=(10, 10)),
-            'ctp': np.random.uniform(100, 1100, size=(10, 10)),
-            'emissivity': np.random.uniform(0, 1, size=(10, 10)),
-            'opt': np.random.uniform(0, 100, size=(10, 10)),
-            'cflag': np.random.randint(0, 4, size=(10, 10))
+    rng = np.random.default_rng(42)
+
+    # 2D scene size for MM/MODIS/MISR
+    ny, nx = 10, 10
+
+    # ERA5 grid (coarser)
+    eyy, exx = 20, 20   # any sizes are fine; just consistent
+
+    data = {
+        "mm_variables": {
+            "cth":        rng.integers(0, 20000, size=(ny, nx), dtype=np.int32),
+            "ctp":        rng.uniform(100, 1100, size=(ny, nx)).astype(np.float32),
+            "emissivity": rng.uniform(0, 1, size=(ny, nx)).astype(np.float32),
+            "opt":        rng.uniform(0, 100, size=(ny, nx)).astype(np.float32),
+            "cflag":      rng.integers(0, 4, size=(ny, nx), dtype=np.int32),
+            "llflag":      rng.integers(0, 4, size=(ny, nx), dtype=np.int32),
         },
-        'mm_geo': {
-            'lat': np.linspace(-90, 90, 10).reshape(10, 1).repeat(10, axis=1),
-            'lon': np.linspace(-180, 180, 10).reshape(1, 10).repeat(10, axis=0),
-            'vza': np.random.uniform(0, 90, size=(10, 10))
+        "mm_geo": {
+            "lat": np.linspace(-40, 40, ny).reshape(ny, 1).repeat(nx, axis=1).astype(np.float32),
+            "lon": np.linspace(-180, 180, nx).reshape(1, nx).repeat(ny, axis=0).astype(np.float32),
+            "vza": rng.uniform(0, 90, size=(ny, nx)).astype(np.float32),
         },
-        'misr_variables': {
-            'cphase': np.random.randint(0, 4, size=(10, 10))
+        # NOTE: The class expects MISR key 'misrcth'
+        "misr_variables": {
+            "misrcth": rng.integers(0, 20000, size=(ny, nx), dtype=np.int32)
         },
-        'modis_variables': {
-            'cth': np.random.randint(0, 20000, size=(10, 10)),
-            'ctp': np.random.uniform(100, 1100, size=(10, 10)),
-            'emissivity': np.random.uniform(0, 1, size=(10, 10)),
-            'opt': np.random.uniform(0, 100, size=(10, 10)),
-            'cphase': np.random.randint(0, 4, size=(10, 10))
+        "modis_variables": {
+            "cth":        rng.integers(0, 20000, size=(ny, nx), dtype=np.int32),
+            # "ctp":        rng.uniform(100, 1100, size=(ny, nx)).astype(np.float32),
+            "emissivity": rng.uniform(0, 1, size=(ny, nx)).astype(np.float32),
+            "opt":        rng.uniform(0, 100, size=(ny, nx)).astype(np.float32),
+            "cphase":     rng.integers(0, 4, size=(ny, nx), dtype=np.int32),
         },
-        'era5_variables': {
-            'ERA5Geopotential': np.random.uniform(-50000, 50000, size=(37，100, 100)),
-            'ERA5Temperature': np.random.uniform(150, 350, size=(37，100, 100)),
-            'ERA5SurfacePressure': np.random.uniform(500, 1100, size=(37，100, 100)),
-            'ERA5Humidity': np.random.uniform(100, 100, size=(100, 100))
+        # ERA5: mix 3D (z, y, x) with z=37 and 2D (y, x)
+        # You can use either mapped keys (e.g., 'temperature_org') or final names (e.g., 'ERA5Temperature').
+        "era5_variables": {
+            "temperature_org":     rng.uniform(150, 350, size=(37, eyy, exx)).astype(np.float32),  # 3D
+            "surface_pressure":    rng.uniform(500, 1100, size=(37, eyy, exx)).astype(np.float32), # 3D
+            "geopotential_org":    rng.uniform(-5e4, 5e4, size=(37, eyy, exx)).astype(np.float32), # 3D
+            "ERA5Humidity":        rng.uniform(0, 1, size=(eyy, exx)).astype(np.float32),          # 2D
         },
-        'era5_geo': {
-            'era5_lat': np.linspace(-90, 90, 5).reshape(5, 1).repeat(5, axis=1),
-            'era5_lon': np.linspace(-180, 180, 5).reshape(1, 5).repeat(5, axis=0)
+        "input_files": [
+            "/in/MOD06.hdf",
+            "/in/MISR_L2.nc",
+            "/in/ERA5_T.nc",
+        ],
+        "global_attrs": {
+            "scene_utc": "2023-05-14T10:24:00Z",
+            "pipeline": "mm-v1",
         }
     }
+    return ny, nx, data
 
-def test_save_mm(logger, sample_data):
-    # Define test filename in temporary directory
-    filename =  "test.nc"
-    saver = NetCDFSaver(filename=filename, logger=logger)
+# ---------- quick test ----------
+def test_save_mm(NetCDFSaverClass):
+    ny, nx, data = sample_data()
+    filename = Path("mm_test.nc")
 
-    # Run the save_mm method
-    saver.save_mm_group(
-        mm_variables=sample_data['mm_variables'],
-        mm_geo=sample_data['mm_geo'],
-        misr_variables=sample_data['misr_variables'],
-        modis_variables=sample_data['modis_variables'],
-        era5_variables=sample_data['era5_variables'],
+    logger = logging.getLogger("NetCDFSaverTest")
+    logger.setLevel(logging.INFO)
+
+    saver = NetCDFSaverClass(str(filename), complevel=5, logger=logger)
+    saver.save_mm(
+        mm_variables=data["mm_variables"],
+        mm_geo=data["mm_geo"],
+        misr_variables=data["misr_variables"],
+        modis_variables=data["modis_variables"],
+        era5_variables=data["era5_variables"],
+        input_files=data["input_files"],
+        global_attrs=data["global_attrs"],
+        # var_attrs={"MMFlag": {"long_name": "MM cloud processing flag"}}
     )
 
-    # Load and check if file was created and data is correct
-    dataset = xr.open_dataset(filename,group='mm_variables')
-    assert 'MMCloudTopHeight' in dataset, "MMCloudTopHeight not saved"
-    assert 'Latitude' in dataset, "Latitude not saved"
-    assert 'Longitude' in dataset, "Longitude not saved"
-    assert dataset['MMCloudTopHeight'].shape == (10, 10), "Incorrect shape for MMCloudTopHeight"
+    # Read back and sanity-check
+    ds = xr.open_dataset(filename)
+
+    # existence
+    assert "MMCloudTopHeight" in ds, "MMCloudTopHeight not saved"
+    assert "Latitude" in ds, "Latitude not saved"
+    assert "Longitude" in ds, "Longitude not saved"
+
+    # shapes for MM plane (must match lat/lon)
+    assert ds["MMCloudTopHeight"].shape == (ny, nx), "Incorrect MMCloudTopHeight shape"
+    assert ds["Latitude"].shape == (ny, nx), "Incorrect Latitude shape"
+    assert ds["Longitude"].shape == (ny, nx), "Incorrect Longitude shape"
+
+    # ERA5 3D: check z length and first/last values
+    assert "ERA5Temperature" in ds, "ERA5Temperature not saved"
+    zcoord = ds.coords.get("z", None)
+    assert zcoord is not None, "z coord missing for ERA5 3D variables"
+    assert zcoord.size == 37, "ERA5 z must have 37 pressure levels"
+    assert int(zcoord.values[0]) == 1 and int(zcoord.values[-1]) == 1000, "ERA5 z levels unexpected"
+
+    ds.close()
+    print("✅ basic round-trip checks passed:", filename)
+
+# ---------- run locally ----------
+if __name__ == "__main__":
+    # from your_module import NetCDFSaver  # if defined elsewhere
+    # For inline testing, just pass the class object you defined earlier:
+    test_save_mm(XarraySaver)

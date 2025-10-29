@@ -1,9 +1,9 @@
 import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
+from scipy.interpolate import PchipInterpolator
 import xarray as xr
 import os
-
 # Define new pressure levels and latitude range
 new_pressure_levels = np.array([0.005, 0.0161, 0.0384, 0.0769, 0.137, 0.2244, 0.3454, 0.5064, 0.714, 0.9753])
 latitudes = np.arange(-90, 90.25, 0.25)
@@ -31,14 +31,14 @@ def interpolate_file(file_path):
     pressure = np.log(line_pressure)
 
     # Interpolation functions
-    print(file_path)
-    print(new_pressure_levels)
+    # print(file_path)
+    # print(new_pressure_levels)
    
     
-    interp_z_km = interp1d(pressure, z_km, kind='linear', bounds_error=False, fill_value=np.nan)
-    interp_h2o = interp1d(pressure, h2o, kind='linear', bounds_error=False, fill_value=np.nan)
-    interp_air = interp1d(pressure, air, kind='linear', bounds_error=False, fill_value=np.nan)
-    interp_t_k = interp1d(pressure, t_k, kind='linear', bounds_error=False, fill_value=np.nan)
+    interp_z_km = PchipInterpolator(pressure, z_km,)
+    interp_h2o = PchipInterpolator(pressure, h2o)
+    interp_air = PchipInterpolator(pressure, air)
+    interp_t_k = PchipInterpolator(pressure, t_k)
     
     # Interpolate data
     
@@ -128,17 +128,29 @@ summer_spring, fall_winter = create_seasonal_datasets(loaded_data)
 # Save the seasonal datasets to a NetCDF file
 ds = xr.Dataset(
     {
-        "summer_spring": (["latitude", "pressure_level", "variable"], summer_spring),
-        "fall_winter": (["latitude", "pressure_level", "variable"], fall_winter),
+        "summer_spring": (["latitude", "pressure_level", "variable"], summer_spring[:,0:10,:]),
+        "fall_winter": (["latitude", "pressure_level", "variable"], fall_winter[:,0:10,:]),
     },
     coords={
         "latitude": latitudes,
-        "pressure_level": new_pressure_levels,
+        "pressure_level": new_pressure_levels[0:10],
         "variable": ["p(mb)", "z(km)", "h2o(cm-3)", "air(cm-3)", "T(K)"]
     },
 )
 
-# ds.to_netcdf("seasonal_profiles.nc")
+ds = ds.transpose("pressure_level", "latitude", "variable")
+
+longitudes = np.arange(0, 360, 0.25)
+
+# Expand the dataset to include the longitude dimension
+dataset_expanded =ds.expand_dims({"longitude": longitudes}, axis=2)
+
+# Repeat the data along the longitude dimension
+ds_broadcast = dataset_expanded.broadcast_like(dataset_expanded)
+
+ds_broadcast = ds_broadcast.transpose("pressure_level", "latitude","longitude", "variable")
+
+ds_broadcast.to_netcdf("seasonal_profiles_chip.nc")
 
 # # Example: Read the NetCDF file using xarray
 # ds_loaded = xr.open_dataset("seasonal_profiles.nc")

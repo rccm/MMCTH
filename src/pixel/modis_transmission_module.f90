@@ -64,13 +64,18 @@ module transmission
 
 !c     Parameters for calculation of variable CO2 concentration adjustment to 'taud'.
   real slp
-  parameter (slp = 1.5 / 365.0)
+  ! parameter (slp = 1.5 / 365.0) !orginal 
+  parameter (slp = 2.5 / 365.0)! ~2.5 ppm/year increase
+  
+  ! parameter (slp = 2 / 365.0) ! changed by GZ on Apr 11
   real smag
   parameter (smag = 3.0)
   real soff
   parameter (soff = 0.41)
   real coff
-  parameter (coff = 337.5)
+  ! parameter (coff = 337.5) 
+  parameter (coff = 420) ! changed by GZ  
+  ! parameter (coff = 370) ! changed by GZ on Apr 11, 2025  
   real pi
   parameter (pi = 3.14159)
 
@@ -238,13 +243,12 @@ contains
     !c ... Argument variables
     real temp(nl), wvmr(nl), ozmr(nl), theta
 !f2py intent(in) :: temp, wvmr, ozmr, theta
-    real taut(nl)
+    real taut(nl) ! taut is one dimesional array but the input is one value
 !f2py intent(out) :: taut
     integer kban, jdet, year, jday
     integer nl
 !f2py intent(in) :: kban, jdet, year, jday
 !This is needed so that f2py knows that nl is defined from the module.
-
     if (init .eq. 1) then
   		ksat=1
   ! c ...   Check the platform name
@@ -421,10 +425,28 @@ contains
   !c     dry
     call taudoc(ncd,nxd,nm,coefd(:,:,j,k),xdry,taud)
   !c     Adjust dry tau for changes in CO2 concentration from model (R. Frey)
-    x = (year - 1980) * 365.25 + jday
-    rco2 = (slp*x - smag*sin(2*pi*(x/365.25 + soff))) + coff
+    ! x = (year - 1980) * 365.25 + jday
+    ! ! x = (mod(year,100) - 80) * 365.25 + jday
+    ! rco2 = (slp*x - smag*sin(2*pi*(x/365.25 + soff))) + coff
+
+  
+    x = (year - 2020) * 365.25 + jday
+    rco2 = (slp * x - smag * sin(2 * pi * (x / 365.25 + soff))) + coff
+    rco2 = min(max(rco2, 350.0), 450.0)
+
+  ! GZ's modification   
   !c     if(rco2.ne.380.) then
-      ratio=rco2/380.0
+  !   slp = 2.0 / 365.25  ! CO2 increase of ~2 ppm per year
+  !   coff = 370.0        ! CO2 concentration in 2000
+    ! x = (year - 2000) * 365.25 + jday
+    ! rco2 = (slp * x - smag * sin(2 * pi * (x / 365.25 + soff))) + coff
+    !print*, 'rco2', rco2
+    !rco2 = min(max(rco2, 350.0), 450.0)   
+    ! The above rco2 calucation is adjusted such year can be four digits instead of
+
+
+    ratio = rco2 / 380.0
+ 
       do jj=1,nl
         tau_test = taud(jj)
         if(taud(jj).gt.0.0 .and. taud(jj).lt.1.0) then
@@ -438,11 +460,11 @@ contains
       enddo
   ! c     endif
   ! c     ozo
-    call taudoc(nco,nxo,nm,coefo(1,1,j,k),xozo,tauo)
+    call taudoc(nco,nxo,nm,coefo(:,:,j,k),xozo,tauo) !# change from coefo(1,1,j,k)
   ! c     wet
     call tauwtr(ncs,ncl,nxs,nxl,nxw,nm,coefs(1,1,j,k), &
    		     coefl(1,1,j,k),xwet,tauw)
-    call taudoc(ncc,nxc,nm,coefc(1,1,j,k),xcon,tauc)
+    call taudoc(ncc,nxc,nm,coefc(:,:,j,k),xcon,tauc) !# change from coefo(1,1,j,k)
     do j=1,nl
       tauw(j)=tauw(j)*tauc(j)
     enddo
@@ -450,6 +472,7 @@ contains
     do j=1,nl
       taut(j)=taud(j)*tauo(j)*tauw(j)
   ! c       write(h_output,'(i5,6f10.6)') j,ozmr(j),oamt(j),taud(j),tauo(j),tauw(j),taut(j)
+      ! write(*,*) j,taut(j)
     enddo
   ! c     write(h_output,'(1x)')
 

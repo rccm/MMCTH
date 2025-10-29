@@ -188,7 +188,7 @@ contains
       end if
 
    else
-     write(*,*), 'getirmis: Frequency exceeded the IR region'
+     write(*,*) 'getirmis: Frequency exceeded the IR region'
 
    endif
 

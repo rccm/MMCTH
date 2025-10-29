@@ -15,6 +15,14 @@ class WoMOD06WTC:
     def run_process(self):
         try:
             self.logger.debug("Running the MISR/MODIS data processing pipeline")
+            
+            res = self.mm_processor.mm_process(process_mod06_cth=False)
+            if res is None:
+                self.logger.error("Processing MISR/MODIS failed")
+                return
+            #!  Finish the part results only return two datasets 
+            misr_cth = res['misr_cth']   # may be None
+            mod_geo  = res['mod_geo']    # always present
             misr_cth, mod_geo  = self.mm_processor.mm_process(process_mod06_cth=False)
             era5_lats, era5_lons = self.era5_processor.era5_lat_lon()
             era5_variables = self.era5_processor.era5_process()
@@ -24,7 +32,6 @@ class WoMOD06WTC:
             outputfile_name = f'{output_dir}MODMISR_L2_CP_{self.mm_processor.id}_O{self.mm_processor.orbit}_v01.nc'
             mmcth = NetCDFSaver(outputfile_name, self.logger)
             mmcth.save(None,misr_cth,mod_geo,None,era5_variables_misrswath)
-
             # self.logger.debug("Output file saved successfully")           
         except Exception as e:
             self.logger.error(f" Main Processing Problems: {e}")

@@ -1,146 +1,179 @@
-import argparse
-import warnings
-warnings.filterwarnings("ignore", message="Failed to load cfgrib - most likely there is a problem accessing the ecCodes library.")
+#!/usr/bin/env python3
+"""
+mmcth driver – distribute MODIS/MISR/ERA5 jobs with MPI
+"""
 
-import sys
-import os
-import time
+import argparse
 import logging
+import os
 import sqlite3
+import sys
+import time
+import warnings
+from pathlib import Path
+
 import numpy as np
 from mpi4py import MPI
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from src.utils import fetch_methods
-from src.data_processors.process_main import MainProcessor
-from src.data_processors.process_wMOD06_woTC import WMOD06WoTC
-from src.data_processors.process_woMOD06_wTC import WoMOD06WTC
+# Silence the cfgrib / ecCodes warning once, globally
+warnings.filterwarnings(
+    "ignore",
+    message="Failed to load cfgrib - most likely there is a problem accessing the ecCodes library."
+)
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger()
+# ---------------------------------------------------------------------
+#  Logging – one global config, no passing logger objects everywhere
+# ---------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,                  # flip to DEBUG if needed
+    format="%(asctime)s %(levelname)s %(name)s:%(lineno)d — %(message)s"
+)
+log = logging.getLogger("mmcth.driver")  # this file’s logger
 
+# ---------------------------------------------------------------------
+#  MPI
+# ---------------------------------------------------------------------
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
+# ---------------------------------------------------------------------
+#  Project imports (after we’ve amended sys.path)
+# ---------------------------------------------------------------------
+PROJECT_DIR = Path(__file__).resolve().parent
+sys.path.append(str(PROJECT_DIR / "src"))
+from src.misc import fetch_methods                       
+from src.data_processors.process_main import MainProcessor
+# from src.data_processors.process_wMOD06_woTC import WMOD06WoTC  
+# from src.data_processors.process_woMOD06_wTC import WoMOD06WTC   
 
-def create_connection(db_file):
-    """ Create a database connection to the SQLite database specified by db_file """
+
+# ---------------------------------------------------------------------
+#  Helpers
+# ---------------------------------------------------------------------
+def create_connection(db_file: str) -> sqlite3.Connection | None:
     try:
-        conn = sqlite3.connect(db_file)
-        return conn
-    except sqlite3.Error as e:
-        logger.error(e)
+        return sqlite3.connect(db_file)
+    except sqlite3.Error as exc:
+        log.error("SQLite connection error: %s", exc)
         return None
 
-# Fetch the group files
-def determine_process_method(mod06_file, tccloud_file, inputfile_list):
-    conditions_to_methods = {
-        (True, False): (WoMOD06WTC, inputfile_list),
-        (False, True): (WMOD06WoTC, inputfile_list),
-        (False, False): (MainProcessor, inputfile_list),
-        (True, True):  (None, None) 
-    }
-    default_method = (MainProcessor, inputfile_list)
-    condition = (os.path.basename(mod06_file) == 'X', os.path.basename(tccloud_file) == 'X')
-    process_class, args = conditions_to_methods.get(condition, default_method)
 
-    # Print out which process method is being used
-    logger.debug(f"Using process method: {process_class.__name__}")
+def determine_process_class(mod06_file: str, tccloud_file: str):
+    # has_mod06 = os.path.basename(mod06_file) != "X"
+    # has_tc    = os.path.basename(tccloud_file) != "X"
+    return MainProcessor
+
+def fetch_and_process_group(inputfile_list: list[str], orbit_number: int):
+    """Run one processor on one group of files with orbit number."""
+    mod06_file, tccloud_file = inputfile_list[1], inputfile_list[3]
+    proc_cls = determine_process_class(mod06_file, tccloud_file)
+    if proc_cls is None:
+        log.info("[rank %d] Skipping group (both MOD06 & TC-Cloud exist): %s",
+                rank, os.path.basename(inputfile_list[0]))
+        return
+    proc_log = logging.LoggerAdapter(
+        logging.getLogger(proc_cls.__name__), {"rank": rank}
+    )
+    start = time.time()
     
-    return process_class, args
+    # Pass orbit number to the processor if it accepts it
+    try:
+        # Try creating processor with orbit number if the constructor supports it
+        proc = proc_cls(inputfile_list, orbit=str(orbit_number), logger=None)
+    except TypeError:
+        # Fall back to original constructor if orbit_number is not supported
+        proc = proc_cls(inputfile_list, logger=None)
+    proc.run_process()
+    proc_log.info("Finished job for orbit %s in %.1f s", orbit_number, time.time() - start)
 
-def fetch_and_process_group(inputfile_list):
-    # Fetch the input files 
-    mod21_file = inputfile_list[0]
-    mod06_file = inputfile_list[1]
-    mod03_file = inputfile_list[2]
-    tccloud_file = inputfile_list[3]
-    agp_file = inputfile_list[4]
-    era5_single_file_current = inputfile_list[5]
-    era5_multi_file_current = inputfile_list[6]
-    
-    logger.debug(f'There are {len(inputfile_list)} input files')
-    logger.debug(f'MOD021KM File >> {mod21_file}') 
-    logger.debug(f'MOD06 File >>  {mod06_file}') 
-    logger.debug(f'MOD03 File >> {mod03_file}') 
-    logger.debug(f'TC_Cloud File >> {tccloud_file}') 
-    logger.debug(f'AGP File >> {agp_file}') 
-    logger.debug(f'ERA5 Single-Level File >> {era5_single_file_current}') 
-    logger.debug(f'ERA5 Pressure-level File >> {era5_multi_file_current}') 
 
-    process_class, args = determine_process_method(mod06_file, tccloud_file, inputfile_list)
-    if process_class is None:
-        logger.debug(f"Skipping this set of input files: {inputfile_list}")
-        return 
-    processor = process_class(args, logger)
-    start_time = time.time()
-    processor.run_process()
-    end_time = time.time()
-    duration = end_time - start_time
-    logger.debug(f"Process {process_class.__name__} took {duration:.2f} seconds to run.")
+# ---------------------------------------------------------------------
+#  Main
+# ---------------------------------------------------------------------
+def main() -> None:
+    p = argparse.ArgumentParser(
+        description="Process MODIS/MISR/ERA5 granule groups."
+    )
+    p.add_argument("-y", "--year",   type=int)
+    p.add_argument("-m", "--month",  type=int)
+    p.add_argument("-d", "--date",   type=str, help="MM-DD")
+    p.add_argument("-o", "--orbit",  type=str)
+    p.add_argument("-i", "--modisid", type=str)
+    p.add_argument("--debug", action="store_true", help="enable debug logging")
+    p.add_argument("--quiet", action="store_true", help="only warnings and errors")
 
-def main():
-    # Command-line argument parsing
-    parser = argparse.ArgumentParser(description='Process satellite data for a given year, month, or date.')
-    parser.add_argument('-y', '--year', type=int, required=True, help='Year to process (e.g., 2016)')
-    parser.add_argument('-m', '--month', type=int, help='Month to process (optional, e.g., 3 for March)')
-    parser.add_argument('-d', '--date', type=str, help='Day to process in MM-DD format (optional)')
-    parser.add_argument('-o', '--orbit', type=str, help='Orbit to process (optional)')
-    parser.add_argument('-i', '--modisid', type=str, help='MODIS ID i.e. A2001.1234 (optional)')
-    
-    args = parser.parse_args()
-    year = args.year
-    month = args.month
-    date = args.date
-    orbit = args.orbit
-    modisid = args.modisid
 
-    # Construct database path
-    db_path = f"/data/keeling/a/gzhao1/f/Database/inputfiles_{year}.sqlite"
+    args = p.parse_args()
+
+    # SQLite database
+    if args.orbit and not args.year:
+        orbit_year, orbit_date = fetch_methods.get_year_from_orbit(args.orbit)
+        if orbit_year is None:
+            log.error("Could not determine year for orbit %s", args.orbit)
+            sys.exit(1)
+        log.info("Orbit %s corresponds to date %s, year %s", args.orbit, orbit_date, orbit_year)
+        db_path = f"/data/keeling/a/gzhao1/f/Database/inputfiles_{orbit_year}.sqlite"
+        args.year = orbit_year  # Set the year for later use
+    else:
+        db_path = f"/data/keeling/a/gzhao1/f/Database/inputfiles_{args.year}.sqlite"
+
     conn = create_connection(db_path)
     if conn is None:
-        logger.error("Cannot connect to the database.")
-        return
-    
-    # Fetch group data based on input parameters
-    if date:
-        # If --date is provided
-        month, day = map(int, date.split('-'))
-        full_date = f"{year}-{month:02d}-{day:02d}"
-        logger.info(f'Fetching files for {full_date}')
-        groups = fetch_methods.fetch_files_by_date(conn, full_date)
-    elif month:
-        # If only --month is provided
-        logger.info(f'Fetching files for {year}-{month:02d}')
-        groups = fetch_methods.fetch_files_by_month(conn, year, month)
-    elif orbit:
-        logger.info(f'Fetching files for {orbit}')
-        groups = fetch_methods.fetch_files_by_orbit(conn, orbit)
-    elif modisid:
-        groups = fetch_methods.fetch_files_by_modisid(conn, modisid) 
+        sys.exit(1)
+
+    conn = create_connection(db_path)
+    if conn is None:
+        sys.exit(1)
+
+    # ---------------- fetch file groups ----------------
+    if args.date:
+        month, day = map(int, args.date.split("-"))
+        stamp      = f"{args.year}-{month:02d}-{day:02d}"
+        groups, orbit_info     = fetch_methods.fetch_files_by_date(conn, stamp)
+    elif args.month:
+        groups, orbit_info = fetch_methods.fetch_files_by_month(conn, args.year, args.month)
+    elif args.orbit:
+        groups, orbit_info = fetch_methods.fetch_files_by_orbit(conn, args.orbit, False)
+    elif args.modisid:
+        groups,orbit_info = fetch_methods.fetch_files_by_modisid(conn, args.modisid)
     else:
-        # Default: process entire year
-        logger.info(f'Fetching files for the entire year {year}')
-        groups = fetch_methods.fetch_files_by_year(conn, year)
+        groups,orbit_info = fetch_methods.fetch_files_by_year(conn, args.year)
 
     group_ids = list(groups.keys())
-    logger.info(f'Found {len(group_ids)} groups.')
+    
+    level = logging.INFO
+    if args.debug:
+        level = logging.DEBUG
+    elif args.quiet:
+        level = logging.WARNING
 
-    if rank == 0:
-    # Split group_ids into roughly equal chunks
-        group_ids_chunk = np.array_split(group_ids, size)
-    else:
-        group_ids_chunk = None
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s"
+    )
+    log.info("Found %d groups", len(group_ids))
 
-    # Scatter job chunks to processes
-    group_ids_chunk = comm.scatter(group_ids_chunk, root=0)
+    # ---------------- scatter work with MPI ------------
+    chunks = np.array_split(group_ids, size) if rank == 0 else None
+    my_ids = comm.scatter(chunks, root=0)
 
-    # Each process handles its assigned group IDs
-    for group_id in group_ids_chunk:
-        logger.debug(f'Processing group ID: {group_id}')
-        fetch_and_process_group(groups[group_id])
-        break 
+    for gid in my_ids:
+        # Get orbit number for this group
+        orbit_number = None
+        if isinstance(orbit_info, dict) and gid in orbit_info:
+            orbit_number = orbit_info[gid]
+        elif isinstance(orbit_info, (int, str)):
+            orbit_number = orbit_info
+        elif isinstance(orbit_info, list) and len(orbit_info) > 0:
+            # If we have a list of orbits, use the first one or find a matching one
+            orbit_number = orbit_info[0]
+        
+        log.debug("Rank %s processing group %s (orbit: %s)", rank, gid, orbit_number)
+        print(f"Rank {rank} is processing group {gid} with orbit {orbit_number}")
+        print(f"Files: {groups[gid]}")
+        fetch_and_process_group(groups[gid], orbit_number)
+    
     conn.close()
 
 if __name__ == "__main__":

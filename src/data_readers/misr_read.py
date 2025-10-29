@@ -64,30 +64,34 @@ class MISRGranule:
         return block_shifts
     
     def align_blks(self, full_data, block_range, f_11km=1):
-        block_start = np.array(block_range[0])
-        block_end = np.array(block_range[1])
-        nblocks = block_end - block_start
+        block_start = np.array(block_range[0]) - 1
+        block_end = np.array(block_range[1]) -1
+        nblocks = block_end - block_start + 1
         z, x, y = full_data.shape
         
-        if block_end <= block_start + 1:
-            return full_data
+        if block_end < block_start + 1:
+            return full_data[block_start,:,:]
         
-        cumblock_shift = np.cumsum(self.block_shifts[block_start-1:block_end] * f_11km)
-        
+        if block_start >= 2:
+            cumblock_shift = np.cumsum(self.block_shifts[block_start-1:block_end] * f_11km)
+        else:
+            cumblock_shift = np.cumsum(self.block_shifts[0:block_end] * f_11km)
         left_bound = np.min(np.append(0, cumblock_shift))
         right_bound = np.max(np.append(0, cumblock_shift))
         
         width = int(y + abs(left_bound) + abs(right_bound))
         height = int(x * nblocks)
-        
-        combined_data = np.full((height, width), np.nan)       
+
+        combined_data = np.full((height, width), np.nan)    
         for i in range(nblocks):
             start_x = i * x
             end_x = (i + 1) * x
             shift = cumblock_shift[i-1] if i > 0 else 0
             left_y = abs(left_bound) + shift
             right_y = left_y + y
-            combined_data[start_x:end_x, left_y:right_y] = full_data[i, :, :]
+            step = i + block_start
+            combined_data[start_x:end_x, left_y:right_y] = full_data[step, :, :]
+            step += 1
         return combined_data
     
     def get_scale_factor(self, group_name, attribute_name):
@@ -122,19 +126,22 @@ class MISRGranule:
         dataset_name, scale_factor = band_info
         if dataset_name is None:
             raise ValueError('Wrong dataset name')
-        sdn_data = self.read_data(dataset_name,block_range)
-        sdn_data = sdn_data >> 2
-        sdn_data = sdn_data.astype('float')
-        sdn_data[sdn_data>= 16377] = np.nan               
         if align:
+            sdn_data = self.read_data(dataset_name,[1,180])
+            sdn_data = sdn_data >> 2
+            sdn_data = sdn_data.astype('float')
+            sdn_data[sdn_data>= 16377] = np.nan     
             sdn = self.align_blks(sdn_data,block_range,f_11km=f_11km)
             sdn = sdn.astype('float')
             rad_aligned = sdn*scale_factor
-            rad_raw = sdn_data*scale_factor
-            return rad_aligned, rad_raw
-        return sdn_data*scale_factor
-        
-        
+            # rad_raw = sdn_data*scale_factor   
+            return rad_aligned
+        else:
+            sdn_data = self.read_data(dataset_name,block_range)
+            sdn_data = sdn_data >> 2
+            sdn_data = sdn_data.astype('float')
+            sdn_data[sdn_data>= 16377] = np.nan         
+            return sdn_data*scale_factor
     
     def get_brf(self, band_name,block_range,f_11km=1, align = False):
         

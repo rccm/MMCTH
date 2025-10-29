@@ -310,7 +310,9 @@ def find_reanalysis_vars(day, month, sstemp, skint, sfpres, temp, shum, geo, dat
     fT          = interp1d(np.log(pressures),T,fill_value='extrapolate')
     fwv         = interp1d(np.log(pressures),h2o,fill_value='extrapolate')
     fz          = interp1d(np.log(pressures),z_levels,fill_value='extrapolate')
-    T           = fT(np.log(P_levels)); wv = fwv(np.log(P_levels)); geo = fz(np.log(P_levels))
+    T           = fT(np.log(P_levels))
+    wv = fwv(np.log(P_levels))
+    geo = fz(np.log(P_levels))
     return T, geo, wv, sfp, skt
 
 def amt2tau(amt):

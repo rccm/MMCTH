@@ -116,3 +116,12 @@ class ERA5Multi:
 
     def get_geopotential(self):
         return self.get_variable('z')
+    
+    def get_u(self):
+        return self.get_variable('u')
+    
+    def get_v(self):
+        return self.get_variable('v')
+    
+    def get_w(self):
+        return self.get_variable('w')

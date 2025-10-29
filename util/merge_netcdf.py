@@ -29,6 +29,7 @@ if __name__ == "__main__":
 
     # Parse command-line arguments
     args = parser.parse_args()
-
+ 
+    print(args.file1, args.file2)
     # Call the merge function with provided arguments
     merge_netcdf(args.file1, args.file2, args.output_file)

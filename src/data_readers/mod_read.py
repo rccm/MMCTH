@@ -369,35 +369,99 @@ class MODL1Granule():
 class MOD06Granule():
     def __init__(self, mod_l1b_fullpath):
         self.fullpath = mod_l1b_fullpath  # Use the passed full path
-    
-    def get_data(self, fieldname,upscale_1km = False, scale_factor_flag = True):
+    @staticmethod
+    def _fit_to_target(arr: np.ndarray, target_shape: tuple[int, int], pad_mode: str = "edge") -> np.ndarray:
+        """Center-crop or pad (edge) to match target_shape = (rows, cols)."""
+        tr, tc = target_shape
+        r, c = arr.shape
 
+        # rows
+        if r > tr:
+            off = (r - tr) // 2
+            arr = arr[off:off + tr, :]
+        elif r < tr:
+            top = (tr - r) // 2
+            bot = tr - r - top
+            arr = np.pad(arr, ((top, bot), (0, 0)), mode=pad_mode)
+
+        # cols
+        r, c = arr.shape
+        if c > tc:
+            off = (c - tc) // 2
+            arr = arr[:, off:off + tc]
+        elif c < tc:
+            left = (tc - c) // 2
+            right = tc - c - left
+            arr = np.pad(arr, ((0, 0), (left, right)), mode=pad_mode)
+
+        return arr
+    def get_data(
+        self,
+        fieldname: str,
+        upscale_1km: bool = False,
+        scale_factor_flag: bool = True,
+        *,
+        target_shape: tuple[int, int] | None = None,
+        target_like: np.ndarray | None = None,
+        pad_mode: str = "edge",
+    ):
+        """
+        Read a MOD06 SDS, optionally upscale 5 km → 1 km using the SDS's
+        Cell_*_Swath_Sampling, crop to its exact 1 km window, and (optionally)
+        fit to a caller-provided target grid.
+        """
         hdf_file = SD(self.fullpath)
-        data = hdf_file.select(fieldname)
+        sds = hdf_file.select(fieldname)
+        attrs = sds.attributes()
+
+        # ---- read ----
+        data_value = sds.get()
+
+        # ---- scale / mask (if requested) ----
         if scale_factor_flag:
-            scale_factor = data.attributes()['scale_factor']
-            offset = data.attributes()['add_offset']
-            data_value = data.get()
-            valid_range = data.attributes()['valid_range']
-            data_value = np.where((data_value >= valid_range[0]) & (data_value <= valid_range[1]), data_value, np.nan)
-            data_value = (data_value - offset) *scale_factor 
+            sf = float(attrs.get('scale_factor', 1.0))
+            off = float(attrs.get('add_offset', 0.0))
+            vr = attrs.get('valid_range', None)
+            fill = attrs.get('_FillValue', None)
+
+            data_value = data_value.astype(np.float32, copy=False)
+            if fill is not None:
+                data_value = np.where(data_value == fill, np.nan, data_value)
+            if vr is not None:
+                lo, hi = float(vr[0]), float(vr[1])
+                data_value = np.where((data_value >= lo) & (data_value <= hi), data_value, np.nan)
+            data_value = (data_value - off) * sf
         else:
-            data_value = data.get()
+            # ensure float so NaNs (from padding/cropping) are valid
+            if np.issubdtype(data_value.dtype, np.integer):
+                data_value = data_value.astype(np.float32, copy=False)
 
-        along_sampling = data.attributes()['Cell_Along_Swath_Sampling']
-        if upscale_1km and along_sampling[-1] != 1:
-            # Upscale the data from 5 km to 1 km by copying
-            repeat_factor = 5  # Copy each 5 km pixel 5 times to reach 1 km resolution
-            target_shape = (2030, 1354)
-            # Resample the data by repeating each value in both dimensions
-            data_value = np.repeat(np.repeat(data_value, repeat_factor, axis=0), repeat_factor, axis=1)
-            current_shape = data_value.shape
+        # ---- optional upscale using SDS sampling triplets ----
+        # triplets are (start, length, step) on the 1 km grid
+        sA = attrs.get('Cell_Along_Swath_Sampling', (0, data_value.shape[0], 1))
+        sC = attrs.get('Cell_Across_Swath_Sampling', (0, data_value.shape[1], 1))
+        startA, lenA, incA = [int(x) for x in sA]
+        startC, lenC, incC = [int(x) for x in sC]
 
-            if current_shape[1] < target_shape[1]:
-                # Pad the across-swath dimension to reach 1354 columns if needed
-                padding_across = target_shape[1] - current_shape[1]
-                data_value = np.pad(data_value, ((0, 0), (0, padding_across)), mode='edge')  # Pads the end by repeating values
-            data_value = data_value[:target_shape[0], :target_shape[1]]
+        if upscale_1km and (incA != 1 or incC != 1):
+            # repeat 5 km → 1 km
+            rep = np.repeat(np.repeat(data_value, incA, axis=0), incC, axis=1)
+
+            # guard occasional off-by-one in starts provided by some granules
+            if startA + lenA > rep.shape[0] and startA > 0:
+                startA -= 1
+            if startC + lenC > rep.shape[1] and startC > 0:
+                startC -= 1
+
+            # crop the exact 1 km window advertised by the SDS
+            data_value = rep[startA:startA + lenA, startC:startC + lenC]
+
+        # ---- fit to a target grid if provided ----
+        if target_like is not None and target_shape is None:
+            target_shape = target_like.shape
+        if target_shape is not None:
+            data_value = self._fit_to_target(data_value, target_shape, pad_mode=pad_mode)
+
         return data_value
         
     def get_ctp(self):
@@ -483,7 +547,9 @@ class MOD06Granule():
         return self.get_data('cloud_top_height_1km',scale_factor_flag=False) 
     
     def get_emissivity(self,upscale_1km = True):
-        return self.get_data('Cloud_Effective_Emissivity',upscale_1km = upscale_1km) 
+        # cth = self.get_cth()
+        # emiss_1km = self.get_data('Cloud_Effective_Emissivity',upscale_1km = upscale_1km,target_like=cth) 
+        return self.get_data('cloud_emissivity_1km',scale_factor_flag=True) 
           
 class MOD03Granule():
     def __init__(self, mod_l1b_fullpath):

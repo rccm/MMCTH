@@ -41,7 +41,8 @@ real(4), intent(inout) :: W_modis(:,:,:)
 real(4), intent(inout) :: Z_modis(:,:,:)
 
 integer :: num_era5_levels, num_modis_levels, lat_size, lon_size
-integer :: i, j, k
+integer :: i, j, k,insert_pos,ilev
+real :: lowest_pressure  
 real(4), allocatable :: log_interp_levels(:)
 real(4), allocatable :: log_modis_levels(:)
 real(4), allocatable :: T_values(:)
@@ -86,29 +87,45 @@ do j = 1, lat_size
     if (surface_T < 0.0 .or. surface_T /= surface_T) then
       surface_T = T_skin(j, k)
     end if
-
     ! Combine ERA5 levels and surface pressure into one array
-    log_interp_levels(1:num_era5_levels) = log(era5_levels)
-    log_interp_levels(num_era5_levels + 1) = log(surface_pressures(j, k))
+    insert_pos = num_era5_levels + 1
+    do ilev = 1, num_era5_levels
+      if (surface_pressures(j, k) >= era5_levels(i)) then
+        insert_pos = ilev ! Position where surface_pressure should be inserted
+        exit
+      end if
+    end do
+    
+    ! Build log_interp_levels with surface_pressure inserted
+    log_interp_levels(1:insert_pos-1) = log(era5_levels(1:insert_pos-1))
+    log_interp_levels(insert_pos) = log(surface_pressures(j, k))
+    if (insert_pos <= num_era5_levels) then  ! Only assign upper part if not at end
+      log_interp_levels(insert_pos+1:num_era5_levels+1) = log(era5_levels(insert_pos:num_era5_levels))
+    end if
+    
 
-    T_values(1:num_era5_levels) = T_era5(:, j, k)
-    T_values(num_era5_levels + 1) = surface_T
+    T_values(1:insert_pos-1) = T_era5(1:insert_pos-1, j, k)
+    T_values(insert_pos) = surface_T
+    if (insert_pos <= num_era5_levels) then  ! Only assign upper part if not at end
+      T_values(insert_pos+1:num_era5_levels+1) = T_era5(insert_pos:num_era5_levels, j, k)
+    end if
 
-    W_values(1:num_era5_levels) = W_era5(:, j, k)
-    W_values(num_era5_levels + 1) = W_surface(j, k)
+    W_values(1:insert_pos-1) = W_era5(1:insert_pos-1, j, k)
+    W_values(insert_pos) = W_surface(j, k)
+    if (insert_pos <= num_era5_levels) then
+      W_values(insert_pos+1:num_era5_levels+1) = W_era5(insert_pos:num_era5_levels, j, k)
+    end if
 
-    Z_values(1:num_era5_levels) = Z_era5(:, j, k)
-    Z_values(num_era5_levels + 1) = 0.0  ! Surface height
-
+    Z_values(1:insert_pos-1) = Z_era5(1:insert_pos-1, j, k)
+    Z_values(insert_pos) = 0.0  ! Surface height
+    if (insert_pos <= num_era5_levels) then
+      Z_values(insert_pos+1:num_era5_levels+1) = Z_era5(insert_pos:num_era5_levels, j, k)
+    end if
     ! Interpolate for each MODIS level
+    !lowest_pressure = max(surface_pressures(j,k), era5_levels(num_era5_levels))
     do i = 1, num_modis_levels
-      if (modis_levels(i) > surface_pressures(j, k)) then
+      if (modis_levels(i) >surface_pressures(j,k) .or. modis_levels(i) < era5_levels(1) ) then
         ! Pressure level is below the surface; set to missing
-        T_modis(i, j, k) = -999.0
-        W_modis(i, j, k) = -999.0
-        Z_modis(i, j, k) = -999.0
-      else if (modis_levels(i) < era5_levels(1)) then
-        ! Pressure level is above the highest ERA5 level; set to missing
         T_modis(i, j, k) = -999.0
         W_modis(i, j, k) = -999.0
         Z_modis(i, j, k) = -999.0

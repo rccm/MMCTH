@@ -235,6 +235,11 @@ h=zs
 do l=2,nl
    m=nl+1-l
    vu=t(m)
+   if(t(m) .lt. -9) then
+    ! Option 1: Skip the level
+     cycle
+   endif 
+
 ! c ..... virtual temperature adjustment
    if(p(m).ge.300.) vu=vu*(1.+.00061*w(m))
    algpu=alog(p(m))
@@ -244,6 +249,7 @@ do l=2,nl
 ! c **** store heights like temp from top down to surface (level 'nl')
 ! c         z(m)=h
 ! c ... R. Frey:    change to km
+   if (h < 0) h = 0 
    z(m)=h * 0.001
 enddo
 return
