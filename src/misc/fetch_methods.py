@@ -2,6 +2,59 @@ import sqlite3
 import argparse
 import subprocess
 import re
+from datetime import datetime
+import calendar
+
+def _range_bounds(start_date_str, end_date_str):
+    """Return inclusive timestamp bounds 'YYYY-MM-DD 00:00:00' to 'YYYY-MM-DD 23:59:59'."""
+    # Validates YYYY-MM-DD and builds safe bounds
+    datetime.strptime(start_date_str, "%Y-%m-%d")
+    datetime.strptime(end_date_str, "%Y-%m-%d")
+    start_ts = f"{start_date_str} 00:00:00"
+    end_ts   = f"{end_date_str} 23:59:59"
+    return start_ts, end_ts
+
+def _add_months(yyyy_mm_dd, n):
+    """Add n months to a YYYY-MM-DD date, clamping day to end-of-month if needed."""
+    dt = datetime.strptime(yyyy_mm_dd, "%Y-%m-%d")
+    y = dt.year + (dt.month - 1 + n) // 12
+    m = (dt.month - 1 + n) % 12 + 1
+    last_day = calendar.monthrange(y, m)[1]
+    d = min(dt.day, last_day)
+    return f"{y:04d}-{m:02d}-{d:02d}"
+
+def fetch_files_by_date_range(conn, start_date, end_date):
+    """
+    Inclusive date range (YYYY-MM-DD to YYYY-MM-DD).
+    Matches all times on end day by extending to 23:59:59.
+    """
+    cursor = conn.cursor()
+    start_ts, end_ts = _range_bounds(start_date, end_date)
+    cursor.execute('''
+        SELECT group_id, file_path, orbit_number
+        FROM files
+        WHERE date >= ? AND date <= ?
+    ''', (start_ts, end_ts))
+    rows = cursor.fetchall()
+    files_by_group, orbit_numbers = {}, set()
+    for group_id, file_path, orbit_number in rows:
+        files_by_group.setdefault(group_id, []).append(file_path)
+        orbit_numbers.add(orbit_number)
+    return files_by_group, sorted(orbit_numbers)
+
+def fetch_files_next_n_months(conn, start_date, n_months):
+    """
+    From start_date (YYYY-MM-DD) through the **last day** of the month that is
+    (n_months-1) months later. For example, start=2001-01-01, n=6 → through 2001-06-30.
+    """
+    if n_months <= 0:
+        return {}, []
+    # Compute inclusive end date = last day of target month
+    end_anchor = _add_months(start_date, n_months - 1)  # same day in target month
+    y, m = map(int, end_anchor.split("-")[:2])
+    last_day = calendar.monthrange(y, m)[1]
+    end_date = f"{y:04d}-{m:02d}-{last_day:02d}"
+    return fetch_files_by_date_range(conn, start_date, end_date)
 
 def get_year_from_orbit(orbit_number):
     """
@@ -16,7 +69,6 @@ def get_year_from_orbit(orbit_number):
             text=True, 
             check=True
         )
-        
         # Parse the output to get the date
         lines = result.stdout.strip().split('\n')
         if len(lines) >= 1:
@@ -160,6 +212,7 @@ def fetch_files_by_month(conn, year, month):
 
 def fetch_files_by_modisid(conn, modis_id):
     cursor = conn.cursor()
+    
     cursor.execute('''
         SELECT group_id, file_path, orbit_number FROM files WHERE modis_id LIKE ?
     ''', ('%' + modis_id + '%',))
@@ -213,12 +266,15 @@ def fetch_all_groups(conn):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process satellite data for a given year, month, or date.')
-    parser.add_argument('-y', '--year', type=int, required=True, help='Year to process (e.g., 2016)')
+    parser.add_argument('-y', '--year', type=int, help='Year to process (e.g., 2016)')
     parser.add_argument('-m', '--month', type=int, help='Month to process (optional, e.g., 3 for March)')
     parser.add_argument('-d', '--date', type=str, help='Day to process in MM-DD format (optional)')
     parser.add_argument('-o', '--orbit', type=str, help='Orbit to process (optional)')
     parser.add_argument('-i', '--modisid', type=str, help='MODIS ID (optional e.g. A2001.1234')
     parser.add_argument('-p', '--path', type=int, help='Path number (optional)')
+    parser.add_argument('-s', '--start-date', type=str, help='Start date YYYY-MM-DD (range mode)')
+    parser.add_argument('-e', '--end-date', type=str, help='End date YYYY-MM-DD (inclusive, range mode)')
+    parser.add_argument('-n', '--months', type=int, help='If set with --start-date, span this many months (inclusive)')
     
     args = parser.parse_args()
     year = args.year
@@ -229,7 +285,7 @@ if __name__ == "__main__":
     path = args.path
 
     # Construct database path
-    database_path = f"/data/keeling/a/gzhao1/f/Database/inputfiles_{year}.sqlite"
+    database_path = f"/data/keeling/a/gzhao1/f/Database/inputfiles_all.sqlite"
     
     conn = create_connection(database_path)
     if conn is None:
@@ -238,7 +294,12 @@ if __name__ == "__main__":
     
     # Get orbit information for different query types
     orbit_info = None
-    if date:
+    if args.start_date and args.end_date:
+        groups, orbit_info = fetch_files_by_date_range(conn, args.start_date, args.end_date)
+    # Next: start date + N months (inclusive to last day of the Nth month)
+    elif args.start_date and args.months:
+        groups, orbit_info = fetch_files_next_n_months(conn, args.start_date, args.months)
+    elif date:
         # If --date is provided
         month_num, day = map(int, date.split('-'))
         full_date = f"{year}-{month_num:02d}-{day:02d}"
@@ -260,7 +321,6 @@ if __name__ == "__main__":
             print(f"Using database for year {orbit_year} instead")
             database_path = f"/data/keeling/a/gzhao1/f/Database/inputfiles_{orbit_year}.sqlite"
             conn = create_connection(database_path)
-        
         groups, orbit_info = fetch_files_by_orbit(conn, orbit)
     elif modisid:
         groups, orbit_info = fetch_files_by_modisid(conn, modisid)

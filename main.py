@@ -92,6 +92,8 @@ def fetch_and_process_group(inputfile_list: list[str], orbit_number: int):
 #  Main
 # ---------------------------------------------------------------------
 def main() -> None:
+    db_path = f"/data/keeling/a/gzhao1/f/Database/inputfiles_all.sqlite"
+
     p = argparse.ArgumentParser(
         description="Process MODIS/MISR/ERA5 granule groups."
     )
@@ -102,32 +104,26 @@ def main() -> None:
     p.add_argument("-i", "--modisid", type=str)
     p.add_argument("--debug", action="store_true", help="enable debug logging")
     p.add_argument("--quiet", action="store_true", help="only warnings and errors")
+    p.add_argument('-s', '--start-date', type=str, help='Start date YYYY-MM-DD (range mode)')
+    p.add_argument('-e', '--end-date', type=str, help='End date YYYY-MM-DD (inclusive, range mode)')
+    p.add_argument('-n', '--months', type=int, help='If set with --start-date, span this many months (inclusive)')
 
 
     args = p.parse_args()
 
-    # SQLite database
-    if args.orbit and not args.year:
-        orbit_year, orbit_date = fetch_methods.get_year_from_orbit(args.orbit)
-        if orbit_year is None:
-            log.error("Could not determine year for orbit %s", args.orbit)
-            sys.exit(1)
-        log.info("Orbit %s corresponds to date %s, year %s", args.orbit, orbit_date, orbit_year)
-        db_path = f"/data/keeling/a/gzhao1/f/Database/inputfiles_{orbit_year}.sqlite"
-        args.year = orbit_year  # Set the year for later use
-    else:
-        db_path = f"/data/keeling/a/gzhao1/f/Database/inputfiles_{args.year}.sqlite"
-
     conn = create_connection(db_path)
     if conn is None:
         sys.exit(1)
-
     conn = create_connection(db_path)
     if conn is None:
         sys.exit(1)
 
     # ---------------- fetch file groups ----------------
-    if args.date:
+    if args.start_date and args.end_date:
+        groups, orbit_info = fetch_methods.fetch_files_by_date_range(conn, args.start_date, args.end_date)
+    elif args.start_date and args.months:
+        groups, orbit_info = fetch_methods.fetch_files_next_n_months(conn, args.start_date, args.months)
+    elif args.date:
         month, day = map(int, args.date.split("-"))
         stamp      = f"{args.year}-{month:02d}-{day:02d}"
         groups, orbit_info     = fetch_methods.fetch_files_by_date(conn, stamp)
@@ -136,10 +132,9 @@ def main() -> None:
     elif args.orbit:
         groups, orbit_info = fetch_methods.fetch_files_by_orbit(conn, args.orbit, False)
     elif args.modisid:
-        groups,orbit_info = fetch_methods.fetch_files_by_modisid(conn, args.modisid)
+        groups,orbit_info = fetch_methods.fetch_files_by_modisid(conn, args.modisid) #.A2003001.2015.
     else:
         groups,orbit_info = fetch_methods.fetch_files_by_year(conn, args.year)
-
     group_ids = list(groups.keys())
     
     level = logging.INFO
@@ -147,7 +142,6 @@ def main() -> None:
         level = logging.DEBUG
     elif args.quiet:
         level = logging.WARNING
-
     logging.basicConfig(
         level=level,
         format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s"

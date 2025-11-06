@@ -13,6 +13,10 @@ from typing import Optional
 from .netcdf_saver import NetCDFSaver
 from .xarray_saver import XarraySaver 
 from src.pixel import modis
+from pyproj import Transformer
+
+
+
 from .misr_cth_to_pressure import height_to_log_pressure
 from .interpolate_to_pressure_levels import interpolate_to_pressure_levels
 
@@ -263,6 +267,9 @@ class MODISMISRProcessor:
                 self.log.error("Error reading MOD06")
                 return None
             out['mod06'] = {k: s(v) for k, v in mod06.items()}
+        else:
+            out['bands_BT'] = None
+            out['mod06'] = None
 
         # ---------- 7. MISR CTH subset ----------'
         if process_misr_cth:
@@ -271,12 +278,56 @@ class MODISMISRProcessor:
                 self.log.error("Error reading MISR CTH")
                 return None
             
+        # Converted Ellipsoid Heights to Sea Surface Height
+            
+            # Build a pipeline: ellipsoidal (WGS84) -> EGM2008 orthometric height via 1′ grid
+   
+            MISR_CTH_FILL = -9999.0
+
+            # EGM2008 1′ grid with 2.5′ fallback (make sure the files are in PROJ's data dir)
+            pipeline = (
+                "+proj=pipeline "
+                "+step +proj=longlat +datum=WGS84 "
+                "+step +proj=vgridshift +grids=us_nga_egm2008_1.tif,egm08_25.gtx"
+            )
+            tr = Transformer.from_pipeline(pipeline)
+
+            # Flatten to consistent 1-D views
+            lonf = np.asarray(misr_lon, dtype=np.float64).ravel(order="C")
+            latf = np.asarray(misr_lat, dtype=np.float64).ravel(order="C")
+            hf   = np.asarray(misr_cth, dtype=np.float64).ravel(order="C")
+
+            # Valid mask: real coords and not fill
+            valid = (
+                np.isfinite(hf) & (hf != MISR_CTH_FILL) &
+                np.isfinite(latf) & (latf >= -90.0) & (latf <= 90.0) &
+                np.isfinite(lonf) & (lonf >= -180.0) & (lonf <= 180.0)
+            )
+            # Output initialized with FILL
+            h_msl_f = np.full(hf.shape, MISR_CTH_FILL, dtype=np.float64)
+            # Transform only valid points (H = h - N)
+            if valid.any():
+                _, _, h_valid = tr.transform(lonf[valid], latf[valid], hf[valid])
+                h_msl_f[valid] = h_valid
+
+            # Back to 2-D shape
+            print(np.max(hf[valid] - h_msl_f[valid]),np.min(hf[valid] - h_msl_f[valid]))
+
+            exit()
+            misr_cth = h_msl_f.reshape(misr_lon.shape, order="C")
             qi_data = self.misr_to_modis(misr_lat, misr_lon, out['mod_geo']['lat'], out['mod_geo']['lon'], misr_cth_qa) 
             qi_data_int8 = self._to_qi_int8(qi_data)  
             out['misr_cth'] = {
                 'misrcth'    : self.misr_to_modis(misr_lat, misr_lon, out['mod_geo']['lat'], out['mod_geo']['lon'], misr_cth),
                 'misrcth_qa' : qi_data_int8
             }
+            del lonf, latf, hf,h_msl_f
+        else:
+            out['misr_cth'] = {
+                'misrcth'    : None,
+                'misrcth_qa' : None,
+            }
+
         return out
             
     def mm_process_old(self, process_misr_cth=True, process_mod06_cth=True ):
@@ -813,7 +864,15 @@ class MainProcessor:
                 v = a[:r, :c]
                 # -> (r//B, B, c//B, B) -> mean over block axes
                 v = v.reshape(r // block_size, block_size, c // block_size, block_size)
-                averaged = np.nanmean(v, axis=(1, 3))
+
+                if v.size == 0 or np.all(np.isnan(v)):
+                    # produce the matching output shape without doing the reduction
+                    out_shape = list(v.shape)
+                    for ax in sorted((1, 3), reverse=True):
+                        del out_shape[ax]
+                    averaged = np.full(tuple(out_shape), np.nan, dtype=np.float32)
+                else:
+                    averaged = np.nanmean(v, axis=(1, 3))
 
             elif a.ndim == 3:  # (z, rows, cols)
                 z, nrows, ncols = a.shape
@@ -825,7 +884,14 @@ class MainProcessor:
                 v = a[:, :r, :c]
                 # -> (z, r//B, B, c//B, B) -> mean over block axes
                 v = v.reshape(z, r // block_size, block_size, c // block_size, block_size)
-                averaged = np.nanmean(v, axis=(2, 4))
+                if v.size == 0 or np.all(np.isnan(v)):
+                    # produce the matching output shape without doing the reduction
+                    out_shape = list(v.shape)
+                    for ax in sorted((2, 4), reverse=True):
+                        del out_shape[ax]
+                    averaged = np.full(tuple(out_shape), np.nan, dtype=np.float32)
+                else:
+                    averaged = np.nanmean(v, axis=(2, 4))
 
             else:
                 raise ValueError(f"Variable '{key}' must be 2D or 3D")
@@ -877,6 +943,15 @@ class MainProcessor:
         else:
             orbit_num = self.orbit
 
+        if self.has_mod06 and self.has_tc:
+            missing_flag = 'None'
+        elif not self.has_mod06:
+            missing_flag = 'MODIS'
+        elif not self.has_tc:
+            missing_flag = 'MISR'
+        else:
+            missing_flag = 'No Way'
+
         mmcth = XarraySaver(outputfile_name, logger=self.log)
         mmcth.save_mm(
             mm_variables=mm_variables,
@@ -888,6 +963,7 @@ class MainProcessor:
             global_attrs={
                 # CF/global attrs usually avoid spaces in keys; underscores are safer:
                 "orbit_number": orbit_num,
+                "Missing Flag": missing_flag,
             },
             var_attrs={
                 "ERA5Latitude":  {"standard_name": "latitude",  "units": "degrees_north"},
@@ -898,15 +974,21 @@ class MainProcessor:
         return
    
     def valid_pixel_condition(self, bands_BT, mod06, misr_cth):
-        mod_cth = np.array(mod06['cth'])
-        # print(f'mod_cth: {np.shape(mod_cth)}')
-        # print(f'misrcth: {np.shape(mod_cth)}')
+        mod_cth = np.asarray(mod06['cth'])
+        misr_cth = np.asarray(misr_cth)  # already an array upstream
+
+        # lazy reduce: allocate the boolean once, combine in place
+        mod_bt_all_bands = None
+        for v in bands_BT.values():
+            m = (v > 0)
+            if mod_bt_all_bands is None:
+                mod_bt_all_bands = m
+            else:
+                np.logical_and(mod_bt_all_bands, m, out=mod_bt_all_bands)
+
+        height_diff = mod_cth - misr_cth
         mod_method = mod06['ctm']
-        bands_stack = np.stack(list(bands_BT.values()), axis=0)  # Shape: (num_bands, height, width)
-        mod_bt_all_bands = np.all(bands_stack > 0, axis=0) 
-        height_diff = mod_cth - np.array(misr_cth)
-        condition = (height_diff > self.cth_diff) & (mod_method == 3 ) & mod_bt_all_bands & (misr_cth >0)
-        return condition
+        return (height_diff > self.cth_diff) & (mod_method == 3) & mod_bt_all_bands & (misr_cth > 0)
     
     def process_pixel_level(self,selected_pixels,bands_BT, mod_geo, misr_cth, era5_variables_misrswath,met_date):
         z_prof = era5_variables_misrswath['geopotential_exp']
@@ -964,20 +1046,27 @@ class MainProcessor:
         Parameters:
             save_flag (str): Indicates the type of output saving strategy. Default is 'debug'.
         """
+        if self.has_mod06 and self.has_tc:
+            file_flag = 'MM'
+        elif not self.has_mod06:
+            file_flag = 'MI'
+        elif not self.has_tc:
+            file_flag = 'MO'
+        else:
+            file_flag = 'NW'
+
+
         if self.mm_processor.orbit is not None:
-            outputfile_name =  f'{self.output_dir}MODMISR_L2_CP_061_{self.mm_processor.id}_{self.mm_processor.orbit}_V00.nc'
+            outputfile_name =  f'{self.output_dir}MODMISR_L2_CP_061_{self.mm_processor.id}_{self.mm_processor.orbit}_{file_flag}_V00.nc'
         elif self.orbit is not None:
-            outputfile_name =  f'{self.output_dir}MODMISR_L2_CP_061_{self.mm_processor.id}_{self.orbit}_V00.nc'
+            outputfile_name =  f'{self.output_dir}MODMISR_L2_CP_061_{self.mm_processor.id}_{self.orbit}_{file_flag}_V00.nc'
         else:
             return
+          
         
         misr_cth_invalid = -600
         self.log.debug("Running the MISR/MODIS data processing pipeline")
         
-        # has_mod06 = getattr(self.mm_processor, "has_mod06", True)
-        # has_tc    = getattr(self.mm_processor, "has_tc", True)
-        
-       
         #!  Finish the part results only return two datasets 
         res = self.mm_processor.mm_process(
             process_misr_cth=self.has_tc,
@@ -1002,6 +1091,8 @@ class MainProcessor:
             era5_lats_1d.values, era5_lons_1d.values,
             era5_variables
         )
+        del era5_variables #release MEM
+
         self.log.debug("ERA5 processing completed successfully")
           
         # save_flag is for debugging 
@@ -1016,14 +1107,16 @@ class MainProcessor:
         
         H, W = mod_geo['lat'].shape
 
+        # Initializing the MM Variables 
+        
         if mod06 is not None:
             mm_variables = {
-                'ctp':        mod06['ctp'].copy(),
-                'emissivity': mod06['emissivity'].copy(),
-                'opt':        mod06['opt'].copy(),
+                'ctp':        np.asarray(mod06['ctp']),          # view
+                'emissivity': np.asarray(mod06['emissivity']),
+                'opt':        np.asarray(mod06['opt']),
                 'cflag':      np.zeros_like(mod06['ctp'], dtype=np.int8),
                 'dflag':      np.zeros_like(mod06['ctp'], dtype=np.int8),
-                'cth':        mod06['cth'].copy(),
+                'cth':        np.asarray(mod06['cth']),
             }
         else:
             # Allocate shells based on grid shape
@@ -1035,18 +1128,24 @@ class MainProcessor:
                 'dflag':      self._zeros2d_like(mod_geo['lat'], dtype=np.int8),
                 'cth':        self._nan2d_like(mod_geo['lat']),
             }
+        
+        for k in ('ctp', 'emissivity', 'opt', 'cth'):
+            mm_variables[k] = mm_variables[k].astype(np.float32, copy=False)
   
         # === Case: MOD06 only (no MISR CTH) ===
 
-        if self.has_mod06 and not self.has_tc:
+        if misr_cth['misrcth'] is None:
             self.log.info("MISR CTH missing; writing MODIS-only product.")
-            valid = (mm_variables['cth'] >= 0)  # your MODIS-valid condition
+            valid = (mm_variables['cth'] >= 0)   
             mm_variables['cflag'][valid] = self.cflag_mod_only
-            self.save_pixels(mm_variables, mod06, mod_geo, None, era5_variables_misrswath, outputfile_name, mod006_flag=True, )
+            misr_cth = {}
+            misr_cth['misrcth'] = self._zeros2d_like(mod_geo['lat']) - 888.0 # Need to be modifed 
+            misr_cth['misrcth_qa'] = self._zeros2d_like(mod_geo['lat'], dtype=np.int8)
+            self.save_pixels(mm_variables, mod06, mod_geo, misr_cth, era5_variables_misrswath, outputfile_name)
             return
-
+        
         # === Case: MISR only (no MOD06) ===
-        if not self.has_mod06 and self.has_tc:
+        if mod06 is None:
             self.log.info("MOD06 missing; writing MISR-only product.")
             misr_arr = misr_cth['misrcth'] if (isinstance(misr_cth, dict) and 'misrcth' in misr_cth) else None
             if misr_arr is None:
@@ -1058,6 +1157,7 @@ class MainProcessor:
             # pass mod06=None; save_pixels will normalize it
             self.save_pixels(mm_variables, None, mod_geo, misr_cth, era5_variables_misrswath, outputfile_name)
             return
+
 
         # === Case: MISR and MODIS Co-Ex ===
                 
@@ -1084,7 +1184,6 @@ class MainProcessor:
     
         cflag = np.zeros_like(mod06['cth']) + self.cflag_mod_only
         cflag[misr_cth['misrcth'] > self.misr_cth_invalid] = self.cflag_misr_only
-
 
         selected_pixels = np.where(valid_pixels)  
         rows, cols = selected_pixels  

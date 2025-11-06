@@ -318,8 +318,12 @@ class XarraySaver:
             dt = np.dtype(encoding[name]['dtype'])
             if np.issubdtype(dt, np.integer):
                 with np.errstate(invalid="ignore"):
-                    vmin = np.nanmin(da.values)  # may warn if all-NaN; ignore
-                    vmax = np.nanmax(da.values)
+                    vals = da.values
+                    if np.all(np.isnan(vals)):
+                        vmin, vmax = np.nan, np.nan
+                    else:
+                        vmin = np.nanmin(vals)
+                        vmax = np.nanmax(vals)
                 info = np.iinfo(dt)
                 if np.isfinite(vmin) and np.isfinite(vmax) and (vmin < info.min or vmax > info.max):
                     self.log.warning(f"{name}: value range [{vmin}, {vmax}] exceeds {dt}")
