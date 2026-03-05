@@ -1,14 +1,15 @@
 
 from pyhdf.SD import SD, SDC
-from pyhdf.HDF import *
+from pyhdf.HDF import HDF, HC
 from pyhdf.VS import *
 import numpy as np
 import re
 import os
 from datetime import datetime
 class MODL1Granule():
-    def __init__(self, mod_l1b_fullpath):
+    def __init__(self, mod_l1b_fullpath,destripe_flag=True):
         self.fullpath = mod_l1b_fullpath  # Use the passed full path
+        self.destripe_flag = destripe_flag
         if os.path.isfile(self.fullpath):
             self.hdf_file = SD(self.fullpath)
         else:
@@ -118,71 +119,239 @@ class MODL1Granule():
         offset = data_field.attributes()[offset_name]
         return scale_factor, offset
 
-    def get_radiance_or_reflectance(self,data_raw, data_field, rad_or_ref = True, scale_factor=True):
-        '''
-        INPUT
-            data_raw:   get_data(filename, fieldname, SD_field_rawData=2)
-            data_field: get_data(filename, fieldname, SD_field_rawData=1)
-            rad_or_ref: boolean - True if radiance, False if reflectance
-            scale_factor: boolean - return this as well if True
-        RETURN
-            radiance: numpy float array - shape=(number of bands, horizontal, vertical)
-        '''
-        #get dimensions of raw data
-        num_bands = np.ma.size(data_raw, axis=0)
-        num_horizontal = np.ma.size(data_raw, axis=1)
-        num_vertical = np.ma.size(data_raw, axis=2)
+    # def get_radiance_or_reflectance(self,data_raw, data_field, rad_or_ref = True, scale_factor_flag=True):
+    #     '''
+    #     INPUT
+    #         data_raw:   get_data(filename, fieldname, SD_field_rawData=2)
+    #         data_field: get_data(filename, fieldname, SD_field_rawData=1)
+    #         rad_or_ref: boolean - True if radiance, False if reflectance
+    #         scale_factor: boolean - return this as well if True
+    #     RETURN
+    #         radiance: numpy float array - shape=(number of bands, horizontal, vertical)
+    #     '''
+    #     #get dimensions of raw data
+    #     num_bands = np.ma.size(data_raw, axis=0)
+    #     num_horizontal = np.ma.size(data_raw, axis=1)
+    #     num_vertical = np.ma.size(data_raw, axis=2)
 
-        #reshape raw data to perform scale and offset correction
-        data_raw_temp = np.reshape(data_raw,(num_bands, num_horizontal * num_vertical))
-        scale_factor, offset = self.get_scale_and_offset(data_field, rad_or_ref=rad_or_ref)
+    #     #reshape raw data to perform scale and offset correction
+    
+    #     data_raw_temp = np.reshape(data_raw,(num_bands, num_horizontal * num_vertical))
+    #     scale_factor, offset = self.get_scale_and_offset(data_field, rad_or_ref=rad_or_ref)
 
-        #fill values found in data
-        detector_saturated = 65533
-        detector_dead      = 65531
-        missing_data       = 65535
-        max_DN             = 32767
-        min_DN             = 0
+    #     #fill values found in data
+    #     detector_saturated = 65533
+    #     detector_dead      = 65531
+    #     missing_data       = 65535
+    #     max_DN             = 32767
+    #     min_DN             = 0
 
-        #to replace DN outside of range and not any of the other fill vals
-        fill_val_bad_data  = -999
+    #     #to replace DN outside of range and not any of the other fill vals
+    #     fill_val_bad_data  = -999
 
-        #save indices of where bad values occured occured
-        detector_saturated_idx = np.where(data_raw_temp == detector_saturated)
-        detector_dead_idx      = np.where(data_raw_temp == detector_dead)
-        missing_data_idx       = np.where(data_raw_temp == missing_data)
-        over_DN_max_idx        = np.where(data_raw_temp >  max_DN)
-        below_min_DN_idx       = np.where(data_raw_temp <  min_DN)
+    #     #save indices of where bad values occured occured
+    #     detector_saturated_idx = np.where(data_raw_temp == detector_saturated)
+    #     detector_dead_idx      = np.where(data_raw_temp == detector_dead)
+    #     missing_data_idx       = np.where(data_raw_temp == missing_data)
+    #     over_DN_max_idx        = np.where(data_raw_temp >  max_DN)
+    #     below_min_DN_idx       = np.where(data_raw_temp <  min_DN)
 
-        #mark all invalid data as nan
-        data_raw_temp = data_raw_temp.astype(np.float)
-        data_raw_temp[over_DN_max_idx]  = np.nan
-        data_raw_temp[below_min_DN_idx] = np.nan
-        #correct raw data to get radiance/reflectance values
-        #correct first band manually
-        data_corrected_total = (data_raw_temp[0,:] - offset[0]) * scale_factor[0]
-        #for loop to put all the bands together
-        for i in range(1,num_bands):
-            #corrected band
-            data_corrected = (data_raw_temp[i,:] - offset[i]) * scale_factor[i]
+    #     #mark all invalid data as nan
+    #     data_raw_temp = data_raw_temp.astype(np.float)
+    #     data_raw_temp[over_DN_max_idx]  = np.nan
+    #     data_raw_temp[below_min_DN_idx] = np.nan
+    #     #correct raw data to get radiance/reflectance values
+    #     #correct first band manually
+    #     if not scale_factor_flag:
+    #         return data_raw_temp.reshape((num_bands, num_horizontal, num_vertical))
+    #     data_corrected_total = (data_raw_temp[0,:] - offset[0]) * scale_factor[0]
+    #     #for loop to put all the bands together
+    #     for i in range(1,num_bands):
+    #         #corrected band
+    #         data_corrected = (data_raw_temp[i,:] - offset[i]) * scale_factor[i]
 
-            #aggregate bands
-            data_corrected_total = np.vstack((data_corrected_total, data_corrected))
+    #         #aggregate bands
+    #         data_corrected_total = np.vstack((data_corrected_total, data_corrected))
 
-        #add fill values back in
-        data_corrected_total[over_DN_max_idx]        = fill_val_bad_data
-        data_corrected_total[below_min_DN_idx]       = fill_val_bad_data
-        data_corrected_total[detector_saturated_idx] = detector_saturated
-        data_corrected_total[detector_dead_idx]      = detector_dead
-        data_corrected_total[missing_data_idx]       = missing_data
+    #     #add fill values back in
+    #     data_corrected_total[over_DN_max_idx]        = fill_val_bad_data
+    #     data_corrected_total[below_min_DN_idx]       = fill_val_bad_data
+    #     data_corrected_total[detector_saturated_idx] = detector_saturated
+    #     data_corrected_total[detector_dead_idx]      = detector_dead
+    #     data_corrected_total[missing_data_idx]       = missing_data
 
-        #get original shape and return radiance/reflectance
-        if not scale_factor:
-            return data_corrected_total.reshape((num_bands, num_horizontal, num_vertical))
+    #     #get original shape and return radiance/reflectance
+    #     return data_corrected_total.reshape((num_bands, num_horizontal, num_vertical)) 
+    def destripe(self, dn, band_name):
+        """
+        EDF destriping via f2py-wrapped MODIS_EDF_DESTRIPE.
+        Returns array in the same orientation as input: (nlines, npixels).
+        """
+        import numpy as np
+        from .modis_edf_destripe import modis_edf_destripe  # f2py module function
+        from pyhdf.SD import SD, SDC
+        from pyhdf.HDF import HDF, HC
+
+        INT32_MISSING = np.int32(-2147483648)
+
+        # --- Config copied from your original code (zero-based ref det) ---
+        DESTRIPE_CFG = {
+            31: (4, [0,0,0,0,0,0,0,0,0,0]),
+            32: (4, [0,0,0,0,0,0,0,0,0,0]),
+            33: (2, [1,0,0,0,0,0,0,0,0,0]),
+            34: (3, [0,0,0,0,0,1,1,1,0,0]),
+            35: (4, [0,0,0,0,0,0,0,0,0,0]),
+            36: (4, [0,0,0,0,0,0,1,0,0,0]),
+        }
+
+        def read_modis_mirror_side(hdf_path):
+            h = HDF(hdf_path, HC.READ)
+            vs = h.vstart()
+            ref = vs.find("Level 1B Swath Metadata")
+            v = vs.attach(ref)
+            v.setfields("Mirror Side")
+            data = v.read(v._nrecs)
+            mir = np.asarray(data, dtype=np.int32).ravel()
+            v.detach()
+            vs.end()
+            h.close()
+            return mir
+
+        def replace_bad_detectors_gumley(destriped_px_line, bad_flags, nscan):
+            """
+            destriped_px_line: shape (npixel, 10*nscan)
+            bad_flags: length-10 list, 1=bad, 0=good
+            """
+            out = destriped_px_line.copy()
+            bad_flags = list(bad_flags)
+
+            for det in range(10):
+                if bad_flags[det] != 1:
+                    continue
+
+                # nearest good neighbor
+                rep = None
+                best = 999
+                for i in range(10):
+                    if i != det and bad_flags[i] == 0:
+                        d = abs(i - det)
+                        if d < best:
+                            best = d
+                            rep = i
+                if rep is None:
+                    continue
+
+                # replace detector line within each scan
+                for s in range(nscan):
+                    out[:, s*10 + det] = out[:, s*10 + rep]
+
+            return out
+
+        # -------------------------------
+        # 1) Validate and normalize input
+        # -------------------------------
+        dn_arr = np.asarray(dn)
+
+        # Keep track of missing sentinel used by your pipeline (if any)
+        miss = (dn_arr.astype(np.int32, copy=False) == INT32_MISSING)
+
+        # We must feed EDF with integer "image" equivalent to ibits(buffer,0,16)
+        # If dn is already integer counts (int16/uint16/int32), do uint16->int32 conversion.
+    
+        if not np.issubdtype(dn_arr.dtype, np.integer):
+            raise TypeError(
+                f"EDF destriper expects integer scaled values (like EV_* SDS), got dtype={dn_arr.dtype}. "
+                "If you currently pass radiance floats, destripe the raw EV_* integer SDS instead."
+            )
+
+        # Expect your pipeline orientation: (nlines, npixels) = (10*nscan, npixel)
+        if dn_arr.ndim != 2:
+            raise ValueError(f"Expected 2D array, got shape {dn_arr.shape}")
+
+        nlines_in, npix_in = dn_arr.shape
+        if nlines_in % 10 == 0:
+            # shape is (nlines, npixel) -> transpose to (npixel, nlines)
+            image_line_px = dn_arr
+            image_px_line = image_line_px.T
+            miss_px_line = miss.T
+        elif npix_in % 10 == 0:
+            # shape is (npixel, nlines) already
+            image_px_line = dn_arr
+            miss_px_line = miss
+            nlines_in = image_px_line.shape[1]
+            npix_in = image_px_line.shape[0]
         else:
-            return data_corrected_total.reshape((num_bands, num_horizontal, num_vertical)) 
-        
-    def get_band_data(self, band_name, data_type):
+            raise ValueError(
+                f"Neither dimension is divisible by 10; cannot interpret scans. shape={dn_arr.shape}"
+            )
+
+        npixel = image_px_line.shape[0]
+        nlines = image_px_line.shape[1]
+        if nlines % 10 != 0:
+            raise ValueError(f"Along-track dim must be multiple of 10, got {nlines}")
+        nscan = nlines // 10
+
+        # ---------------------------------------------
+        # 2) Mimic Fortran driver: image = ibits(...,16)
+        # ---------------------------------------------
+        # Interpret raw 16 bits as unsigned then widen to int32.
+        # This matches ibits(buffer,0,16) even if underlying is int16.
+        image_i32 = np.asarray(image_px_line, dtype=np.uint16).astype(np.int32, copy=False)
+        image_i32 = np.asfortranarray(image_i32)  # (npixel, 10*nscan), Fortran contiguous
+
+        # ---------------------------------------
+        # 3) Mirror side: enforce scan consistency
+        # ---------------------------------------
+        mir = read_modis_mirror_side(self.fullpath).astype(np.int32).ravel()
+
+        # Many files store mirror side per scan (len == nscan). f2py expects nscan+1.
+        # For exact matching with your subset behavior, we require mir length == nscan here.
+        if mir.size != nscan and mir.size != (nscan + 1):
+            raise ValueError(
+                f"Mirror side length {mir.size} does not match nscan {nscan} (or nscan+1). "
+                "This usually means your dn has been subset but mirror side was not subset the same way."
+            )
+        if mir.size == nscan:
+            mir_use = np.concatenate([mir, mir[-1:]])  # length nscan+1 for f2py
+        else:
+            mir_use = mir  # already nscan+1
+        # -----------------------------
+        # 4) Call EDF destriping routine
+        # -----------------------------
+        ref_det, bad_flags = DESTRIPE_CFG[int(band_name)]
+
+        destriped_i32, errflag = modis_edf_destripe(
+            np.int32(ref_det),
+            mir_use,
+            image_i32,
+            npixel=np.int32(npixel),
+            nscan=np.int32(nscan),
+        )
+        errflag = int(errflag)
+
+        destriped_i32 = np.asarray(destriped_i32, dtype=np.int32)
+
+        # ---------------------------------------------------
+        # 5) Replace bad detectors ONLY if errflag == 0 (ref)
+        # ---------------------------------------------------
+        if errflag == 0:
+            destriped_i32 = replace_bad_detectors_gumley(destriped_i32, bad_flags, nscan)
+        else:
+            # Reference driver: if errflag != 0, it typically returns original image
+            destriped_i32 = image_i32
+
+        # -----------------------------
+        # 6) Restore missing sentinel(s)
+        # -----------------------------
+        destriped_i32[miss_px_line] = INT32_MISSING
+
+        if (nlines_in % 10) == 0 and dn_arr.shape[0] == nlines_in:
+            return destriped_i32.T  # back to (nlines, npixel)
+        else:
+            return destriped_i32  # already (npixel, nlines)
+    
+
+    def get_band_data(self, band_name, data_type,scale_flag = True):
         """
         Retrieve radiance or reflectance data for a specified band.
 
@@ -196,8 +365,7 @@ class MODL1Granule():
         Raises:
         - ValueError: If the band name is not found or if an invalid data type is specified.
         """
-        hdf_file = SD(self.fullpath, SDC.READ)
-        
+        hdf_file = SD(self.fullpath, SDC.READ)        
         emissive_dataset = hdf_file.select('EV_1KM_Emissive')
         refsb_dataset = hdf_file.select('EV_1KM_RefSB')
         refsb_dataset_250m = hdf_file.select('EV_250_Aggr1km_RefSB')
@@ -209,10 +377,25 @@ class MODL1Granule():
         refsb_band_500m_names = refsb_dataset_500m.attributes()['band_names'].split(',')
 
         if band_name in emissive_band_names:
-            dataset = emissive_dataset
+            dataset  = emissive_dataset
             band_names = emissive_band_names
+            band_index = band_names.index(band_name)
+            band_data_raw  = dataset[band_index, :, :]
+            if self.destripe_flag and int(band_name) in [31,32,33,34,35,36]:
+                band_data = self.destripe(band_data_raw,band_name)
+            else:
+                band_data = band_data_raw
             scales = dataset.attributes()['radiance_scales']
             offsets = dataset.attributes()['radiance_offsets']
+            valid_range = dataset.attributes()['valid_range']
+            band_data = band_data.astype(np.float32)
+            band_data = np.where((band_data >= valid_range[0]) & (band_data <= valid_range[1]), band_data, np.nan)    
+            # Scale the data using the appropriate scales and offsets
+            if scale_flag:
+                band_data = (band_data - offsets[band_index]) * scales[band_index]
+                return band_data
+            else:
+                return band_data
         elif band_name in refsb_band_names:
             dataset = refsb_dataset
             band_names = refsb_band_names
@@ -252,17 +435,19 @@ class MODL1Granule():
 
         # Find the index of the requested band name
         band_index = band_names.index(band_name)
-
         # Extract the data for the specific band
         band_data = dataset[band_index, :, :]
-
         # Set values outside the valid range to np.nan
         valid_range = dataset.attributes()['valid_range']
-        band_data = np.where((band_data >= valid_range[0]) & (band_data <= valid_range[1]), band_data, np.nan)
-
+        # dn_band_data = np.copy(band_data)
+        band_data = band_data.astype(np.float32)
+        band_data = np.where((band_data >= valid_range[0]) & (band_data <= valid_range[1]), band_data, np.nan)    
         # Scale the data using the appropriate scales and offsets
-        band_data = (band_data - offsets[band_index]) * scales[band_index]
-        return band_data
+        if scale_flag:
+            band_data = (band_data - offsets[band_index]) * scales[band_index]
+            return band_data
+        else:
+            return band_data
     
     def get_BT(self, band_name, units=1, satellite='TERRA'):
         """
@@ -544,12 +729,12 @@ class MOD06Granule():
         return new_cloud_multi_layer_flag
 
     def get_cth(self):
-        return self.get_data('cloud_top_height_1km',scale_factor_flag=False) 
+        return self.get_data('cloud_top_height_1km') 
     
     def get_emissivity(self,upscale_1km = True):
         # cth = self.get_cth()
         # emiss_1km = self.get_data('Cloud_Effective_Emissivity',upscale_1km = upscale_1km,target_like=cth) 
-        return self.get_data('cloud_emissivity_1km',scale_factor_flag=True) 
+        return self.get_data('cloud_emissivity_1km') 
           
 class MOD03Granule():
     def __init__(self, mod_l1b_fullpath):

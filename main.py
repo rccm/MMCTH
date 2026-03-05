@@ -84,7 +84,7 @@ def fetch_and_process_group(inputfile_list: list[str], orbit_number: int):
     except TypeError:
         # Fall back to original constructor if orbit_number is not supported
         proc = proc_cls(inputfile_list, logger=None)
-    proc.run_process()
+    proc.run_process(save_flag='not_debug')
     proc_log.info("Finished job for orbit %s in %.1f s", orbit_number, time.time() - start)
 
 
@@ -121,6 +121,7 @@ def main() -> None:
     # ---------------- fetch file groups ----------------
     if args.start_date and args.end_date:
         groups, orbit_info = fetch_methods.fetch_files_by_date_range(conn, args.start_date, args.end_date)
+        # print(orbit_info[0],orbit_info[-1])
     elif args.start_date and args.months:
         groups, orbit_info = fetch_methods.fetch_files_next_n_months(conn, args.start_date, args.months)
     elif args.date:
@@ -164,9 +165,25 @@ def main() -> None:
             orbit_number = orbit_info[0]
         
         log.debug("Rank %s processing group %s (orbit: %s)", rank, gid, orbit_number)
-        print(f"Rank {rank} is processing group {gid} with orbit {orbit_number}")
-        print(f"Files: {groups[gid]}")
-        fetch_and_process_group(groups[gid], orbit_number)
+        print(f"Rank {rank} is processing group {gid} with orbit {orbit_number}", flush=True)
+        print(f"Files: {groups[gid]}", flush=True)
+        try:
+            fetch_and_process_group(groups[gid], orbit_number)
+        except ValueError as e:
+            log.warning(
+                "Non-fatal: gid=%s skipped (%s) orbit=%s files=%s",
+                gid, e, orbit_number, groups[gid]
+            )
+            continue
+        except Exception:
+            files = groups[gid]
+            mod021km = os.path.basename(files[0]) if len(files) > 0 else "NA"
+            misr_tc  = os.path.basename(files[3]) if len(files) > 3 else "NA"
+            log.exception(
+                "FAILED gid=%s orbit=%s modis=%s misr_tc=%s files=%s",
+                gid, orbit_number, mod021km, misr_tc, files
+            )
+            continue
     
     conn.close()
 

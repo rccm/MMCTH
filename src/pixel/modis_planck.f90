@@ -12,7 +12,8 @@ module planck_bright
  implicit none
  private
  public modis_bright, bright_m, modis_planck, &
-        brite_m, planc_m, planck_m
+        brite_m, planc_m, planck_m, modis_planck_shift, &
+        modis_bright_shift
 ! ... Planck constant (Joule second)
   double precision h
   parameter (h = 6.62606876d-34)
@@ -82,8 +83,185 @@ module planck_bright
    7.287017E-02, 7.037161E-02, 2.177889E-01, 2.037728E-01,&
    1.559624E-01, 7.989879E-02, 1.176660E-01, 6.856633E-02,&
    1.903625E-02, 1.902709E-02, 1.859296E-02, 1.619453E-02/
+   
+! ---- Shifted-SRF coefficients (2011–2012 updates; Terra & Aqua) ----
+!     TERRA shifts noted in MCST updates:
+!     B27:+4 cm^-1, B28:+2, B30:+1, B34:+0.8, B35:+0.8, B36:+1
+!     AQUA shifts:  B27:+5, B28:+2, B34:+0.8, B35:+0.8, B36:+1
+!
+! Bands ordered as: 20,21,22,23, 24,25,27,28, 29,30,31,32, 33,34,35,36
+
+real cwn_terra_sh(16), tcs_terra_sh(16), tci_terra_sh(16)
+real cwn_aqua_sh(16),  tcs_aqua_sh(16),  tci_aqua_sh(16)
+
+! --- Terra (shifted SRF) effective central wavenumbers [cm^-1]
+data cwn_terra_sh/ &
+  2.641767E+03, 2.505274E+03, 2.518031E+03, 2.465422E+03, &
+  2.235812E+03, 2.200345E+03, 1.482026E+03, 1.364741E+03, &
+  1.173198E+03, 1.028703E+03, 9.081998E+02, 8.315149E+02, &
+  7.483224E+02, 7.317089E+02, 7.196677E+02, 7.055309E+02/
+
+! --- Terra (shifted SRF) temperature-correction slope (tcs) [–]
+data tcs_terra_sh/ &
+  9.993487E-01, 9.998699E-01, 9.998604E-01, 9.998701E-01, &
+  9.998825E-01, 9.998849E-01, 9.994965E-01, 9.994950E-01, &
+  9.995643E-01, 9.997502E-01, 9.995880E-01, 9.997388E-01, &
+  9.999192E-01, 9.999170E-01, 9.999176E-01, 9.999267E-01/
+
+! --- Terra (shifted SRF) temperature-correction intercept (tci) [K]
+data tci_terra_sh/ &
+  4.744530E-01, 9.091094E-02, 9.694298E-02, 8.856134E-02, &
+  7.287017E-02, 7.037161E-02, 2.173196E-01, 2.035303E-01, &
+  1.559624E-01, 7.987902E-02, 1.176660E-01, 6.856633E-02, &
+  1.903625E-02, 1.905849E-02, 1.858763E-02, 1.617507E-02/
+
+! --- Aqua (shifted SRF) effective central wavenumbers [cm^-1]
+data cwn_aqua_sh/ &
+  2.647418E+03, 2.511763E+03, 2.517910E+03, 2.462446E+03, &
+  2.248296E+03, 2.209550E+03, 1.479292E+03, 1.363638E+03, &
+  1.169637E+03, 1.028715E+03, 9.076808E+02, 8.308397E+02, &
+  7.482977E+02, 7.315760E+02, 7.190090E+02, 7.045020E+02/
+
+! --- Aqua (shifted SRF) temperature-correction slope (tcs) [–]
+data tcs_aqua_sh/ &
+  9.993438E-01, 9.998680E-01, 9.998649E-01, 9.998729E-01, &
+  9.998738E-01, 9.998774E-01, 9.995754E-01, 9.994906E-01, &
+  9.995439E-01, 9.997496E-01, 9.995483E-01, 9.997404E-01, &
+  9.999194E-01, 9.999071E-01, 9.999177E-01, 9.999211E-01/
+
+! --- Aqua (shifted SRF) temperature-correction intercept (tci) [K]
+data tci_aqua_sh/ &
+  4.792821E-01, 9.260598E-02, 9.387793E-02, 8.659482E-02, &
+  7.854801E-02, 7.521532E-02, 1.828557E-01, 2.051362E-01, &
+  1.628724E-01, 8.003410E-02, 1.290129E-01, 6.810679E-02, &
+  1.895925E-02, 2.131206E-02, 1.858586E-02, 1.737030E-02/
 
 contains
+
+  real function modis_planck_shift(temp, band, units)
+! ----------------------------------------------------------------------
+! Compute Planck radiance using UPDATED (shifted-SRF) MODIS band physics.
+! - Supports both Terra and Aqua via `platform_name` from module platform.
+! - Uses updated effective central wavenumbers and T-correction (tcs,tci).
+! Inputs:
+!   temp  [K]     band-equivalent brightness temperature
+!   band  [int]   MODIS IR band (20–25, 27–36; 26 invalid)
+!   units [int]   0 => mW m^-2 sr^-1 (cm^-1)^-1   (wavenumber)
+!                 1 =>  W m^-2 sr^-1 µm^-1        (wavelength)
+! Output:
+!   modis_planck_shift [real] radiance in units specified by `units`
+! Notes:
+!   Returns -1.0 on invalid inputs.
+! ----------------------------------------------------------------------
+    use platform
+    implicit none
+
+    real    :: temp, cwn, tcs, tci
+    integer :: band, units, index
+    character(len=5) :: p
+
+    modis_planck_shift = -1.0
+
+    if (temp .le. 0.0 .or. band .lt. 20 .or. band .gt. 36 .or. band .eq. 26) return
+
+    if (band .le. 25) then
+      index = band - 19
+    else
+      index = band - 20
+    endif
+
+    ! --- Choose shifted SRF/coeffs by platform (case-insensitive)
+    if (platform_name(1:5) == 'TERRA' .or. platform_name(1:5) == 'Terra' .or. platform_name(1:5) == 'terra') then
+      cwn = cwn_terra_sh(index)
+      tcs = tcs_terra_sh(index)
+      tci = tci_terra_sh(index)
+    else if (platform_name(1:4) == 'AQUA' .or. platform_name(1:4) == 'Aqua' .or. platform_name(1:4) == 'aqua') then
+      cwn = cwn_aqua_sh(index)
+      tcs = tcs_aqua_sh(index)
+      tci = tci_aqua_sh(index)
+    else
+      ! Fallback: treat as Terra
+      cwn = cwn_terra_sh(index)
+      tcs = tcs_terra_sh(index)
+      tci = tci_terra_sh(index)
+    end if
+
+    if (units .eq. 1) then
+      ! W m^-2 sr^-1 µm^-1
+      modis_planck_shift = planck_m(1.0e+4 / cwn, temp * tcs + tci)
+    else
+      ! mW m^-2 sr^-1 (cm^-1)^-1
+      modis_planck_shift = planc_m(cwn,          temp * tcs + tci)
+    end if
+
+  end function modis_planck_shift
+  
+  real function modis_bright_shift(rad, band, units)
+! ----------------------------------------------------------------------
+! Convert MODIS radiance → brightness temperature *with SRF shifts*
+! Inputs:
+!   rad     [radiance]            input radiance
+!   band    [integer]             MODIS IR band (20–25, 27–36; 26 invalid)
+!   units   [integer flag]        0 => mW m^-2 sr^-1 (cm^-1)^-1
+!                                 1 => W  m^-2 sr^-1 µm^-1
+! Output:
+!   modis_bright_shift [K]       brightness temperature
+! Notes:
+!   - Uses detector-averaged SRF shift tables (Terra/Aqua)
+!   - Applies linear temperature correction:  (Tb_raw - tci)/tcs
+!   - Returns -1.0 for invalid inputs
+! ----------------------------------------------------------------------
+    use platform        ! provides platform_name
+    implicit none
+
+    real    :: rad, cwn, tcs, tci, tb_raw
+    integer :: band, units, index
+
+    modis_bright_shift = -1.0
+
+    ! ---------------- basic sanity checks ----------------
+    if (rad .le. 0.0) return
+    if (band .lt. 20 .or. band .gt. 36 .or. band .eq. 26) return
+
+    ! Band mapping: 20→index1 ... 36→index16, except 26 skipped
+    if (band .le. 25) then
+      index = band - 19        ! 20→1 ... 25→6
+    else
+      index = band - 20        ! 27→7 ... 36→16
+    endif
+
+    ! ---------------- select Terra/Aqua MRD shifts ----------------
+    if (platform_name(1:5) == 'TERRA' .or. platform_name(1:5) == 'Terra' .or. platform_name(1:5) == 'terra') then
+      cwn = cwn_terra_sh(index)
+      tcs = tcs_terra_sh(index)
+      tci = tci_terra_sh(index)
+    else if (platform_name(1:4) == 'AQUA' .or. platform_name(1:4) == 'Aqua' .or. platform_name(1:4) == 'aqua') then
+      cwn = cwn_aqua_sh(index)
+      tcs = tcs_aqua_sh(index)
+      tci = tci_aqua_sh(index)
+    else
+      ! default: Terra coefficients
+      cwn = cwn_terra_sh(index)
+      tcs = tcs_terra_sh(index)
+      tci = tci_terra_sh(index)
+    end if
+
+    ! ---------------- convert radiance → raw BT ----------------
+    if (units == 1) then
+       ! rad in W m^-2 sr^-1 / µm
+       tb_raw = bright_m(1.0e4 / cwn, rad)
+    else
+       ! rad in mW m^-2 sr^-1 / (cm^-1)
+       tb_raw = brite_m(cwn, rad)
+    end if
+
+    if (tb_raw <= 0.0) return
+
+    ! ---------------- temperature linear correction ----------------
+    modis_bright_shift = (tb_raw - tci) / tcs
+
+  end function modis_bright_shift
+
 
   real function modis_bright(rad, band, units)
     !Original description.

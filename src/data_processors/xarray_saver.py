@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 
 import numpy as np
+import re
 import xarray as xr
 
 
@@ -39,17 +40,13 @@ class XarraySaver:
                   'long_name': 'multi-mission cloud top pressure'},
         'emissivity': {'name': 'MM_CloudEffectiveEmissivity', 'units': '1', 'dtype': 'float32',
                        'long_name': 'multi-mission cloud effective emissivity'},
-        'opt':   {'name': 'MMCloudOpticalDepth',         'units': '1',   'dtype': 'float32',
+        'opt':   {'name': 'MM_CloudOpticalDepth',         'units': '1',   'dtype': 'float32',
                   'long_name': 'multi-mission cloud optical depth'},
 
         'cflag': {'name': 'MM_Flag', 'units': '1', 'dtype': 'int8',
                   'flag_values': np.array([0, 1, 2, 3, 4, 5, 6], dtype='int8'),
                   'flag_meanings': 'clear low_cloud mid_cloud high_cloud multilayer ambiguous invalid',
-                  'long_name': 'cloud classification/quality flag'},
-        'dflag': {'name': 'MM_DiagFlag', 'units': '1', 'dtype': 'int8',
-                  'flag_values': np.array([0, 1, 2, 3], dtype='int8'),
-                  'flag_meanings': 'ok radiance_qc_failed geometry_qc_failed other_diagnostic',
-                  'long_name': 'diagnostic flag'}
+                  'long_name': 'cloud classification/quality flag'},       
     }
 
     MODIS_SCHEMA: Dict[str, Dict[str, Any]] = {
@@ -57,10 +54,12 @@ class XarraySaver:
                   'long_name': 'MODIS cloud top height'},
         'ctp':   {'name': 'MODIS_CloudTopPressure',      'units': 'hPa', 'dtype': 'float32',
                   'long_name': 'MODIS cloud top pressure'},
-        'emissivity': {'name': 'MODIS_CloudEmissivity',  'units': '1',   'dtype': 'float32',
+        'emissivity': {'name': 'MODIS_CloudEffectiveEmissivity',  'units': '1',   'dtype': 'float32',
                        'long_name': 'MODIS cloud emissivity'},
         'opt':   {'name': 'MODIS_CloudOpticalDepth',     'units': '1',   'dtype': 'float32',
                   'long_name': 'MODIS cloud optical depth'},
+        'ctm':   {'name': 'MODIS_CloudTopMethod',     'units': '1',   'dtype': 'int8',
+                  'long_name': 'MODIS cloud top method'},          
         'cphase':{'name': 'MODIS_CloudPhase',            'units': '1',   'dtype': 'int8',
                   'flag_values': np.array([0, 1, 2, 3], dtype='int8'),
                   'flag_meanings': 'water ice mixed unknown',
@@ -391,9 +390,12 @@ class XarraySaver:
         out.setdefault('title', 'Fused MISR and MODIS Cloud Properties')
         out.setdefault('institution', 'University of Illinois at Urbana-Champaign')
         out.setdefault('source', 'MISR AM1 + MODIS MOD06/MOD03 + ERA5 reanalysis')
-        out.setdefault('history', f"{datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}: created by XarraySaver")
+        out.setdefault('history', f"{datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}: created on keeling.earth.illinois.edu")
         out.setdefault('references', 'https://cfconventions.org/')
         out['date_created'] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        s = self.filename
+        starting_time = (lambda y,t,md: f"{y}-{md[:2]}-{md[2:]}T{t[:2]}:{t[2:]}:00Z")(*re.search(r"_A(\d{4})\d{3}\.(\d{4})_(\d{4})_", s).groups())
+        out['starting_time'] = starting_time
 
         # Nice-to-have ACDD geospatial extents (not required but harmless/handy)
         with np.errstate(invalid="ignore"):
@@ -407,6 +409,7 @@ class XarraySaver:
         out['SOUTHBOUNDINGCOORDINATE'] = out['geospatial_lat_max']
         out['WESTBOUNDINGCOORDINATE']  = out['geospatial_lon_min']
         out['EASTBOUNDINGCOORDINATE']  = out['geospatial_lon_max']
+        # starting_time -> "2015-12-23 17:25"
 
         if input_files:
             for i, p in enumerate(input_files[0:5]):

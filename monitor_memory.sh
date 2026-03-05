@@ -1,5 +1,5 @@
 #!/bin/bash
-python main.py -y 2006 -i .A2006166.1610. &
+python ./tests/test_process_main.py &
 PID=$!
 
 MAX_MEM=0

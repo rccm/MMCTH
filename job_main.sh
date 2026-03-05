@@ -2,15 +2,16 @@
 #SBATCH -p sesebig
 #SBATCH -J mmcth
 #SBATCH -t 2:00:00
-#SBATCH --ntasks=20
+#SBATCH --ntasks=32
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=0                 # all memory on each node
 #SBATCH --exclusive
 #SBATCH --mail-type=FAIL,END
 #SBATCH --mail-user=gzhao1@illinois.edu
-#SBATCH -o slurm_create_dataset.out
-#SBATCH -e slurm_create_dataset.err
+#SBATCH -o slurm_create_dataset.%A_%a.out
+#SBATCH -e slurm_create_dataset.%A_%a.err
+
 
 module purge
 module load mpi/openmpi-x86_64
@@ -24,4 +25,4 @@ export NUMEXPR_MAX_THREADS=4
 export NUMEXPR_NUM_THREADS=4
 export HDF5_USE_FILE_LOCKING=FALSE
 
-srun --mpi=pmix_v3 python /data/gdi/f/gzhao1/mmcth/main.py -y 2003 -d 01-02
+srun --mpi=pmix_v3 python /data/gdi/f/gzhao1/mmcth/main.py  -s 2015-01-02 -e 2015-06-30

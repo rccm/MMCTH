@@ -45,10 +45,17 @@ class MODISMISRProcessor:
             if (save_format == 'org'):
                 print('write reflecance as well...')
                 bands_radiance = {f'rad_{band}': mod21.get_band_data(str(band), 'radiance') for band in [2,36, 35, 34, 33, 31]}
+                combined_bands = {**bands_BT, **bands_radiance}
+            elif (save_format == 'debug'):
+                bands_radiance = {f'rad_{band}': mod21.get_band_data(str(band), 'radiance') for band in [2,36, 35, 34, 33, 31]}
+                bands_dn = {f'dn_{band}': mod21.get_band_data(str(band), 'radiance',scale_flag=False) for band in [2,36, 35, 34, 33, 31]} 
+                combined_bands = {**bands_BT, **bands_radiance,**bands_dn}
             else:
                 bands_radiance = {f'rad_{band}': mod21.get_band_data(str(band), 'radiance') for band in [36, 35, 34, 33, 31]}
+                combined_bands = {**bands_BT, **bands_radiance}
+
             self.log.debug("MOD21 data processed successfully")
-            combined_bands = {**bands_BT, **bands_radiance}
+           
             # combined_bands = {**bands_BT}
             return combined_bands
         except Exception as e:
@@ -135,55 +142,6 @@ class MODISMISRProcessor:
         except Exception as e:
             self.log.error(f"Error applying valid indices: {e}")
             return None
-
-    def mm_process_modis_only(self):
-        mod_lat, mod_lon, mod_landsea, mod_vza = self.process_mod03()
-        if mod_lat is None or mod_lon is None or mod_landsea is None:
-            self.log.error("Error retrieving MODIS Lat, Lon, or Landsea mask")
-            return None
-
-        misr_lat, misr_lon = self.get_misr_geo()
-        if misr_lat is None or misr_lon is None:
-            self.log.error("Error retrieving MISR Lat, Lon")
-            return None
-
-        misr_mod_swath = self.misr_to_modis(misr_lat, misr_lon, mod_lat, mod_lon, misr_lat)
-        if misr_mod_swath is None:
-            self.log.error("Error finding MISR Swath over MODIS grid")
-            return None
-        
-        valid_rows, valid_cols = self.cutoff_misr_swath(misr_mod_swath)
-        if valid_rows is None or valid_cols is None:
-            self.log.error("Error cutting off invalid parts of MISR swath")
-            return None
-        
-        mod_lat_misrswath = self.apply_valid_indices(mod_lat, valid_rows, valid_cols)
-        mod_lon_misrswath = self.apply_valid_indices(mod_lon, valid_rows, valid_cols)
-        if mod_lat_misrswath is None or mod_lon_misrswath is None:
-            self.log.error("Error applying valid indices to MODIS swath")
-            return None
-        
-        mod06_product = self.process_mod06()
-        if mod06_product:
-            mod06_misrswath = [self.apply_valid_indices(mod06_product[key], valid_rows, valid_cols) for key in mod06_product]
-            mod06_misrswath_dict = {key: value for key, value in zip(mod06_product.keys(), mod06_misrswath)}
-
-        else:
-            self.log.error("Error retrieving MOD06 data")
-            return None
-
-        bands_BT = self.process_mod21(save_format='org')
-        bands_BT_misrswath = [self.apply_valid_indices(bands_BT[key], valid_rows, valid_cols) for key in bands_BT]
-        bands_BT_misrswath_dict = {key: value for key, value in zip(bands_BT.keys(), bands_BT_misrswath)}
-
-        mod_geo_misrswath = {
-            'lat': self.apply_valid_indices(mod_lat, valid_rows, valid_cols),
-            'lon': self.apply_valid_indices(mod_lon, valid_rows, valid_cols),
-            'landsea': self.apply_valid_indices(mod_landsea, valid_rows, valid_cols),
-            'vza': self.apply_valid_indices(mod_vza, valid_rows, valid_cols)
-        }
-
-        return bands_BT_misrswath_dict, mod_geo_misrswath, mod06_misrswath_dict
     
     def _to_qi_int8(self,a, *, missing_sentinel=-999.0, fill=-128):
         """Map NaN/±Inf/-999 → -128, round valid values, clip to [0,100], cast to int8."""
@@ -203,7 +161,7 @@ class MODISMISRProcessor:
         np.clip(a, -128, 127, out=a)
         return a.astype(np.int8, copy=False)
     
-    def mm_process(self, *, process_misr_cth: bool = True, process_mod06_cth: bool = True):
+    def mm_process(self, *, process_misr_cth: bool = True, process_mod06_cth: bool = True, scale_flag: str = 'not_debug'):
         """
         Re‑project MISR → MODIS, subset to the overlapping swath, and (optionally)
         assemble MISR‑CTH and MOD06 fields.
@@ -226,17 +184,20 @@ class MODISMISRProcessor:
         if any(v is None for v in (mod_lat, mod_lon, mod_landsea)):
             self.log.error("Error retrieving MODIS lat/lon/land‑sea mask")
             return None
+        if np.isnan(mod_lat).any() or np.isnan(mod_lon).any() or (mod_lat<-444.0).any() or (mod_lon <-444.0).any() :
+            self.log.error("NaN detected in MODIS lat/lon; returning None.")
+            return None         
+        
         # ---------- 2. Read MISR geo ----------
         misr_lat, misr_lon = self.get_misr_geo()
-        # print(misr_lat.shape, mod_lat.shape)
         if any(v is None for v in (misr_lat, misr_lon)):
             self.log.error("Error retrieving MISR lat/lon")
             return None
 
         # ---------- 3. Overlap mask ----------
         misr_mod_swath = self.misr_to_modis(misr_lat, misr_lon, mod_lat, mod_lon, misr_lat)
-        
-        if misr_mod_swath is None:
+        if np.all(misr_mod_swath<=-999) or misr_mod_swath is None :
+            print('return')
             self.log.error("Error finding MISR swath on MODIS grid")
             return None
         valid_rows, valid_cols = self.cutoff_misr_swath(misr_mod_swath)
@@ -244,7 +205,7 @@ class MODISMISRProcessor:
             self.log.error("Error retrieving MISR lat/lon")
             return None 
         
-        # Helper to slice MODIS arrays to the MISR footprint
+        # Helper to slice MODIS arrays to the MISR footprintprint(valid_rows)
         s = lambda arr: self.apply_valid_indices(arr, valid_rows, valid_cols)
 
         # ---------- 4. Always build MODIS geo subset ----------
@@ -257,7 +218,7 @@ class MODISMISRProcessor:
 
         # ---------- 5. Bands BT/radiance (needed only if MOD06 is used) ----------
         if process_mod06_cth:
-            bands_BT = self.process_mod21()
+            bands_BT = self.process_mod21(save_format=scale_flag)
             if bands_BT is None:
                 self.log.error("Error reading MOD21")
                 return None
@@ -291,12 +252,11 @@ class MODISMISRProcessor:
                 "+step +proj=vgridshift +grids=us_nga_egm2008_1.tif,egm08_25.gtx"
             )
             tr = Transformer.from_pipeline(pipeline)
-
             # Flatten to consistent 1-D views
             lonf = np.asarray(misr_lon, dtype=np.float64).ravel(order="C")
             latf = np.asarray(misr_lat, dtype=np.float64).ravel(order="C")
             hf   = np.asarray(misr_cth, dtype=np.float64).ravel(order="C")
-
+            
             # Valid mask: real coords and not fill
             valid = (
                 np.isfinite(hf) & (hf != MISR_CTH_FILL) &
@@ -310,10 +270,6 @@ class MODISMISRProcessor:
                 _, _, h_valid = tr.transform(lonf[valid], latf[valid], hf[valid])
                 h_msl_f[valid] = h_valid
 
-            # Back to 2-D shape
-            print(np.max(hf[valid] - h_msl_f[valid]),np.min(hf[valid] - h_msl_f[valid]))
-
-            exit()
             misr_cth = h_msl_f.reshape(misr_lon.shape, order="C")
             qi_data = self.misr_to_modis(misr_lat, misr_lon, out['mod_geo']['lat'], out['mod_geo']['lon'], misr_cth_qa) 
             qi_data_int8 = self._to_qi_int8(qi_data)  
@@ -330,97 +286,6 @@ class MODISMISRProcessor:
 
         return out
             
-    def mm_process_old(self, process_misr_cth=True, process_mod06_cth=True ):
-        result = {
-            'bands_BT': None,
-            'misr_cth': None,
-            'mod_geo': None,
-            'mod06': None,
-        }
-        mod_lat, mod_lon, mod_landsea, mod_vza = self.process_mod03()
-        if mod_lat is None or mod_lon is None or mod_landsea is None:
-            self.log.error("Error retrieving MODIS Lat, Lon, or Landsea mask")
-            return None
-
-        misr_lat, misr_lon = self.get_misr_geo()
-    
-        if misr_lat is None or misr_lon is None:
-            self.log.error("Error retrieving MISR Lat, Lon")
-            return None
-        # The reprojection code requires the padding values np.nan instead of any acually numbers like -999
-        misr_mod_swath = self.misr_to_modis(misr_lat, misr_lon, mod_lat, mod_lon, misr_lat)
-        # print(misr_mod_swath[misr_mod_swath>-990])
-        if misr_mod_swath is None:
-            self.log.error("Error finding MISR Swath over MODIS grid")
-            return None
-        
-        valid_rows, valid_cols = self.cutoff_misr_swath(misr_mod_swath)
-        if valid_rows is None or valid_cols is None:
-            self.log.error("Error cutting off invalid parts of MISR swath")
-            return None
- 
-        mod_lat_misrswath = self.apply_valid_indices(mod_lat, valid_rows, valid_cols)
-        mod_lon_misrswath = self.apply_valid_indices(mod_lon, valid_rows, valid_cols)
-        if mod_lat_misrswath is None or mod_lon_misrswath is None:
-            self.log.error("Error applying valid indices to MODIS swath")
-            return None
-        
-        mod_geo_misrswath = {
-            'lat': self.apply_valid_indices(mod_lat, valid_rows, valid_cols),
-            'lon': self.apply_valid_indices(mod_lon, valid_rows, valid_cols),
-            'landsea': self.apply_valid_indices(mod_landsea, valid_rows, valid_cols),
-            'vza': self.apply_valid_indices(mod_vza, valid_rows, valid_cols)
-        }
-        
-        misr_cth_dict = None
-        mod06_misrswath_dict = None
-        bands_BT_misrswath_dict = None
-
-        if process_mod06_cth and process_misr_cth:
-            bands_BT = self.process_mod21()
-            bands_BT_misrswath = [self.apply_valid_indices(bands_BT[key], valid_rows, valid_cols) for key in bands_BT]
-            bands_BT_misrswath_dict = {key: value for key, value in zip(bands_BT.keys(), bands_BT_misrswath)}
-            mod06_product = self.process_mod06()
-            if mod06_product:
-                mod06_misrswath = [self.apply_valid_indices(mod06_product[key], valid_rows, valid_cols) for key in mod06_product]
-                mod06_misrswath_dict = {key: value for key, value in zip(mod06_product.keys(), mod06_misrswath)}
-            else:
-                self.log.error("Error retrieving MOD06 data")
-                return None        
-            misr_cth,misr_cth_qa = self.get_misr_cth()
-            if misr_cth is None:
-                self.log.error("Error retrieving MISR cloud top height data")
-                return None
-            misr_cth_modisswath = self.misr_to_modis(misr_lat, misr_lon, mod_lat_misrswath, mod_lon_misrswath, misr_cth)
-            misr_cth_modisswath_qa = self.misr_to_modis(misr_lat, misr_lon, mod_lat_misrswath, mod_lon_misrswath, misr_cth_qa)
-            misr_cth_dict = {
-                 'misrcth': misr_cth_modisswath,
-                 'misrcth_qa': misr_cth_modisswath_qa,
-            }
-       
-            return bands_BT_misrswath_dict, misr_cth_dict, mod_geo_misrswath, mod06_misrswath_dict
-        elif not process_mod06_cth and process_misr_cth: 
-            misr_cth,misr_cth_qa = self.get_misr_cth()
-            if misr_cth is None:
-                self.log.error("Error retrieving MISR cloud top height data")
-                return None
-            misr_cth_modisswath = self.misr_to_modis(misr_lat, misr_lon, mod_lat_misrswath, mod_lon_misrswath, misr_cth)
-            misr_cth_modisswath_qa = self.misr_to_modis(misr_lat, misr_lon, mod_lat_misrswath, mod_lon_misrswath, misr_cth_qa)
-            misr_cth_dict = {
-                 'misr_cth': misr_cth_modisswath,
-                 'misr_cth_qa': misr_cth_modisswath_qa,
-            }
-            return misr_cth_dict, mod_geo_misrswath 
-        elif not process_misr_cth and process_mod06_cth : 
-            mod06_product = self.process_mod06()
-            if mod06_product:
-                mod06_misrswath = [self.apply_valid_indices(mod06_product[key], valid_rows, valid_cols) for key in mod06_product]
-                mod06_misrswath_dict = {key: value for key, value in zip(mod06_product.keys(), mod06_misrswath)}
-            else:
-                self.log.error("Error retrieving MOD06 data")
-                return None                 
-            return  mod06_misrswath_dict, mod_geo_misrswath
-                
 
 class ERA5Processor:
     def __init__(self, input_files, logger: Optional[logging.Logger] = None, latlon_idx = None):
@@ -431,7 +296,7 @@ class ERA5Processor:
         self.era5_multi_file_next_day = input_files[8]
         self.mod21_file  = input_files[0]
         self.era5_read = importlib.import_module('src.data_readers.era5_read')
-        self.month =re.search(r"_\d{4}_(\d{2})_\d{2}\.nc", self.era5_multi_file).group(1) 
+        self.month = int(re.search(r"_\d{4}_(\d{2})_\d{2}\.nc", self.era5_multi_file).group(1))
         self.MODIS = importlib.import_module('src.pixel.modis')
         self.P_levels = self.MODIS.transmission.pstd
         self.P_levels_gt_1mb = self.P_levels[self.P_levels>=1]
@@ -440,7 +305,7 @@ class ERA5Processor:
         self.timestamp = re.search(r"\.(\d{4})\.",self.mod21_file).group(1) 
         self.profile_file = '/data/gdi/f/gzhao1/mmcth/externaldata/std_atmos_profile.nc'
 
-    def era5_timeinterpolate(self, era5_vars_dict, era5_vars_dict_next_day=None):
+    def era5_timeinterpolate_bk(self, era5_vars_dict, era5_vars_dict_next_day=None):
         try:
             self.log.debug("Interpolating ERA5 data to target time")
             interpolated_data = {}
@@ -501,7 +366,7 @@ class ERA5Processor:
                 'skint': era5_single.get_skt(),  
                 'msp' : era5_single.get_msl(),      
             }
-            self.log.debug("ERA5 data (surface layer) processed successfully")
+            self.log.debug("ERA5 data (surface layer) read successfully")
             return result
         except Exception as e:
             self.log.error(f"Error processing ERA5 data (surface layer): {e}")
@@ -514,19 +379,17 @@ class ERA5Processor:
             era5_multi = self.era5_read.ERA5Multi(era5_multi_file)
             result = {
                 'temperature': era5_multi.get_temperature(),
-                'specific_humidity': era5_multi.get_specific_humidity()*1e3,  # convert the unit of kg/kg to g/kg
+                'specific_humidity': era5_multi.get_specific_humidity(),  # convert the unit of kg/kg to g/kg
                 'geopotential': era5_multi.get_geopotential(),
                 'u': era5_multi.get_u(),
                 'v': era5_multi.get_v(),
                 'w': era5_multi.get_w(),
             }
-            self.log.debug("ERA5 data (pressure level) processed successfully")
+            self.log.debug("ERA5 data (pressure level) read successfully")
             return result
         except Exception as e:
             self.log.error(f"Error processing ERA5 data (pressure level): {e}")
             return None
-
-    
 
     def save_to_netcdf(self, filename, **variables):
         """
@@ -628,57 +491,78 @@ class ERA5Processor:
 
             turple: EAR5 surface/near-surface data along with profile data that have been interpolated into 101 pressure levels 
         """
-        # print(f'W profile: {modis.transmission.wstd}')
-
-        # print(f'T profile: {modis.transmission.tstd}')
-
-        # print(f'psfc profile: {modis.transmission.pstd}')
-
-
+        
 
         latitudes, _ = self.era5_lat_lon()
         latitudes = latitudes.values
         
-        var_single = self.ear5_read_single(self.era5_single_file)
-        var_multi = self.ear5_read_multi(self.era5_multi_file)
-        
-        var_single_next_day = None
-        var_multi_next_day = None
-        
-        target_hour = float(self.timestamp[0:2])
-        if target_hour >= 23.0:
-            var_multi_next_day = self.ear5_read_multi(self.era5_multi_file_next_day) 
-            var_single_next_day = self.ear5_read_single(self.era5_single_file_next_day) 
-        
-        var_single = self.era5_timeinterpolate(var_single, var_single_next_day)
-        var_multi = self.era5_timeinterpolate(var_multi, var_multi_next_day)
-    
+        def _normalize_time_dim(d: dict, *, ntime=24):
+            out = {}
+            for k, v in d.items():
+                if not hasattr(v, "dims"):
+                    out[k] = v
+                    continue
+
+                rename = {}
+
+                # normalize time dim
+                for cand in ("time", "valid_time"):
+                    if cand in v.dims and v.sizes.get(cand, None) == ntime:
+                        if cand != "time":
+                            rename[cand] = "time"
+                        break
+
+                # normalize vertical dim (critical for next-day mixing)
+                if "pressure_level" in v.dims and "level" not in v.dims:
+                    rename["pressure_level"] = "level"
+                # some cfgrib files use this name
+                if "isobaricInhPa" in v.dims and "level" not in v.dims:
+                    rename["isobaricInhPa"] = "level"
+
+                if rename:
+                    v = v.rename(rename)
+
+                out[k] = v
+            return out
+        # def _try_load(d, label, tindex):
+        #     for k, v in d.items():
+        #         try:
+        #             src = getattr(v, "encoding", {}).get("source", "NA")
+        #             print(f"[{label}] trying {k} time={tindex} source={src}")
+        #             v.isel(time=tindex).load()   # forces read
+        #             print(f"[{label}] OK {k}")
+        #         except Exception as e:
+        #             print(f"[{label}] FAIL {k} time={tindex} source={src}\n  -> {repr(e)}")
+        #             raise
+        var_single = _normalize_time_dim(self.ear5_read_single(self.era5_single_file), ntime=24)
+        var_multi  = _normalize_time_dim(self.ear5_read_multi(self.era5_multi_file),  ntime=24)
+        assert var_multi["temperature"].sizes["time"] == 24  
+        # --- target time in hours (UTC) ---
+        hh = int(self.timestamp[:2])
+        mm = int(self.timestamp[2:])
+        w  = mm / 60.0          # weight on next hour
+        wb = 1.0 - w            # weight on current hour
+        before = hh
+        after  = (hh + 1) % 24
+        need_next_day = (hh == 23 and mm > 0)
+        if need_next_day:
+            var_single_next_day = _normalize_time_dim(self.ear5_read_single(self.era5_single_file_next_day), ntime=24)
+            var_multi_next_day  = _normalize_time_dim(self.ear5_read_multi(self.era5_multi_file_next_day),  ntime=24)
+            var_single = {k: (v.isel(time=before) * wb + var_single_next_day[k].isel(time=0) * w) for k, v in var_single.items()}
+            var_multi  = {k: (v.isel(time=before) * wb + var_multi_next_day[k].isel(time=0)  * w) for k, v in var_multi.items()}
+        else:
+            var_single = {k: (v.isel(time=before) * wb + v.isel(time=after) * w) for k, v in var_single.items()}
+            var_multi  = {k: (v.isel(time=before) * wb + v.isel(time=after) * w) for k, v in var_multi.items()}
+        # unit conversion after interpolation (kg/kg -> g/kg)
         if no_interploate: 
             result = var_single.copy()
             result.update(var_multi)
             return result
-
-
-
+        var_multi["specific_humidity"] = var_multi["specific_humidity"] * 1e3
         T_multi = var_multi['temperature'] 
         W_multi = var_multi['specific_humidity']/1000/(1-var_multi['specific_humidity']/1000) # check again .....
         Z_multi = var_multi['geopotential'] / 9.80665e3
-         
-        # Interpolate the data into pressure_levels larger than 1mb
-        # 'dew2m': dew2m_mixingratio,
-        # 'sst': era5_single.get_sst(),
-        # 'temp2m': era5_single.get_t2m(),
-        # 'surface_pressure': era5_single.get_sp(),
-        # 'skint': era5_single.get_skt(),  
-        # 'msp' : era5_single.get_msl(),      
- 
-        # for key in ['surface_pressure', 'dew2m', 'skint', 'sst']:
-        #     if key in var_single:
-        #         value = var_single[key][200, 400]
-        #         print(f"{key} at [200, 400]: {value.values}")
-        #     else:
-        #         print(f"{key} is not found in var_single")
-
+        self.log.debug("ERA5 Temporal Interoplation is done successfully") 
          
         # Define dimensions explicitly
         num_era5_levels = int(T_multi.shape[0])  # 37
@@ -725,9 +609,10 @@ class ERA5Processor:
         profile_data = self.load_std_atmos_profile()
 
         temperature_profile = profile_data.sel(variable="T(K)").values
-        offset_T = T_interpolated[0, :, :] - temperature_profile[-1, :, :]
-  
-        temperature_profile += offset_T[np.newaxis, :, :]
+        # Not shifting 
+        # offset_T = T_interpolated[0, :, :] - temperature_profile[-1, :, :]
+        # temperature_profile += offset_T[np.newaxis, :, :]
+
         T_expand = np.concatenate((temperature_profile,T_interpolated),axis=0)
         
         # need to verify each variable
@@ -759,8 +644,16 @@ class ERA5Processor:
             'v': var_multi['v'],
             'w': var_multi['w'],
         })
-
-        #! For Debugging  
+        for k, v in result.items():
+            if hasattr(v, "values"):
+                result[k] = v.values
+                #! For Debugging  
+        # self.log.info("ERA5 result contains %d variables", len(result))
+        # for k, v in result.items():
+        #     if hasattr(v, "shape"):
+        #         self.log.info("ERA5 %-22s shape=%s dtype=%s", k, v.shape, v.dtype)
+        #     else:
+        #         self.log.info("ERA5 %-22s type=%s", k, type(v).__name__)
 
         # internal_variable = {
         #     't_org': T_multi,
@@ -787,7 +680,8 @@ class MainProcessor:
         inputfile_list: list[str],
         orbit: str = None,
         logger: Optional[logging.Logger] = None,
-        output_dir: str = "/data/keeling/a/gzhao1/f/mmcth/output/",
+        output_dir: str = "/data/keeling/a/gzhao1/f/mmcth/ds_output/",
+        save_flag: str = 'not_debug',
     ):
         # ------------------------ 2.  local logger -------------------------
         # if caller passes None we fall back to a class‑scoped one
@@ -819,7 +713,7 @@ class MainProcessor:
             [*map(int, re.search(r"era5_single_(\d{4})_(\d{2})_(\d{2})", inputfile_list[5]).groups()), 0],
             dtype="int32",
         ).reshape(4)
-
+        self.mmdd = "".join(re.search(r"era5_single_(\d{4})_(\d{2})_(\d{2})", inputfile_list[5]).groups()[1:])  
         self.cth_diff = 1000 # m threshold for MISR CTH - MODID CTH
         self.misr_cth_invalid = -500
         self.modis_cth_invalid = 0
@@ -845,82 +739,95 @@ class MainProcessor:
             'instrument': modis_granule.instrument
         }
         return modis_metadata
-
-    def block_average_dict(self, variable_dict, block_size=10):
+    def block_average_dict(self, variable_dict, block_size=10, fill_nan_when_too_small=True):
+        """
+        Robust block-averaging over last two axes (y, x).
+        - Never raises on small arrays; returns (0,0) or full-NaN grids instead.
+        - Avoids 'Mean of empty slice' by using count-aware means.
+        - Casts to float32 so NaNs are always supported.
+        """
         averaged_dict = {}
+
+        def _block_reduce_last2(a, B):
+            a = np.asarray(a)
+            if a.ndim not in (2, 3):
+                raise ValueError("array must be 2D (y,x) or 3D (z,y,x)")
+
+            # Ensure float for NaN-safe ops (ERA5 fields are continuous anyway)
+            if not np.issubdtype(a.dtype, np.floating):
+                a = a.astype(np.float32, copy=False)
+
+            if a.ndim == 2:
+                H, W = a.shape
+                r, c = (H // B) * B, (W // B) * B
+                if r == 0 or c == 0:
+                    # No full blocks available
+                    return (np.empty((0, 0), dtype=np.float32)
+                            if not fill_nan_when_too_small else
+                            np.full((H // B, W // B), np.nan, np.float32))
+                v = a[:r, :c].reshape(r // B, B, c // B, B)  # (nby,B,nbx,B)
+                with np.errstate(invalid="ignore"):
+                    cnt = np.sum(~np.isnan(v), axis=(1, 3))       # (nby, nbx)
+                    s   = np.nansum(v,           axis=(1, 3))
+                    out = np.divide(s, cnt, out=np.full_like(s, np.nan, dtype=np.float32), where=cnt > 0)
+                return out.astype(np.float32, copy=False)
+
+            else:  # 3D (z,y,x)
+                Z, H, W = a.shape
+                r, c = (H // B) * B, (W // B) * B
+                if r == 0 or c == 0:
+                    # No full blocks available
+                    return (np.empty((a.shape[0], 0, 0), dtype=np.float32)
+                            if not fill_nan_when_too_small else
+                            np.full((a.shape[0], H // B, W // B), np.nan, np.float32))
+                v = a[:, :r, :c].reshape(Z, r // B, B, c // B, B)  # (Z,nby,B,nbx,B)
+                with np.errstate(invalid="ignore"):
+                    cnt = np.sum(~np.isnan(v), axis=(2, 4))         # (Z, nby, nbx)
+                    s   = np.nansum(v,           axis=(2, 4))
+                    out = np.divide(s, cnt, out=np.full_like(s, np.nan, dtype=np.float32), where=cnt > 0)
+                return out.astype(np.float32, copy=False)
 
         for key, variable in variable_dict.items():
             if key.endswith('exp'):
                 continue
-
-            a = np.asarray(variable)
-            if a.ndim == 2:  # (rows, cols)
-                nrows, ncols = a.shape
-                r = (nrows // block_size) * block_size
-                c = (ncols // block_size) * block_size
-                if r == 0 or c == 0:
-                    raise ValueError(f"{key}: array too small for block_size={block_size}")
-
-                v = a[:r, :c]
-                # -> (r//B, B, c//B, B) -> mean over block axes
-                v = v.reshape(r // block_size, block_size, c // block_size, block_size)
-
-                if v.size == 0 or np.all(np.isnan(v)):
-                    # produce the matching output shape without doing the reduction
-                    out_shape = list(v.shape)
-                    for ax in sorted((1, 3), reverse=True):
-                        del out_shape[ax]
-                    averaged = np.full(tuple(out_shape), np.nan, dtype=np.float32)
-                else:
-                    averaged = np.nanmean(v, axis=(1, 3))
-
-            elif a.ndim == 3:  # (z, rows, cols)
-                z, nrows, ncols = a.shape
-                r = (nrows // block_size) * block_size
-                c = (ncols // block_size) * block_size
-                if r == 0 or c == 0:
-                    raise ValueError(f"{key}: array too small for block_size={block_size}")
-
-                v = a[:, :r, :c]
-                # -> (z, r//B, B, c//B, B) -> mean over block axes
-                v = v.reshape(z, r // block_size, block_size, c // block_size, block_size)
-                if v.size == 0 or np.all(np.isnan(v)):
-                    # produce the matching output shape without doing the reduction
-                    out_shape = list(v.shape)
-                    for ax in sorted((2, 4), reverse=True):
-                        del out_shape[ax]
-                    averaged = np.full(tuple(out_shape), np.nan, dtype=np.float32)
-                else:
-                    averaged = np.nanmean(v, axis=(2, 4))
-
-            else:
-                raise ValueError(f"Variable '{key}' must be 2D or 3D")
-
-            averaged_dict[key] = averaged
+            try:
+                averaged_dict[key] = _block_reduce_last2(variable, block_size)
+            except Exception as e:
+                # Never let one field kill the rank
+                self.logger.warning("block_average_dict: key=%s shape=%s fallback to None (%s)",
+                                    key, getattr(variable, "shape", None), e)
+                averaged_dict[key] = None
         return averaged_dict
 
 
-    def calculate_block_lat_lon(self, era5_lats, era5_lons, block_size=10):
+    def calculate_block_lat_lon(self, era5_lats, era5_lons, block_size=10, center_choice="upper"):
         """
-        Center-pixel lat/lon for each *full* block, matching block-average shapes.
-        Returns arrays of shape (nrows//block_size, ncols//block_size).
+        Center-pixel lat/lon for each full block, matching block-average shapes.
+        center_choice: "upper" -> index = B//2 (e.g., 5 for B=10)
+                    "lower" -> index = B//2 - 1 (e.g., 4 for B=10)
         """
         assert era5_lats.shape == era5_lons.shape, "lat/lon shapes must match"
         nrows, ncols = era5_lats.shape
-
-        # Truncate to full blocks (same behavior as your block averaging)
         rblocks = nrows // block_size
         cblocks = ncols // block_size
-        r = rblocks * block_size
-        c = cblocks * block_size
+        if rblocks == 0 or cblocks == 0:
+            return (np.empty((0, 0), dtype=era5_lats.dtype),
+                    np.empty((0, 0), dtype=era5_lons.dtype))
 
-        row_idx = (block_size // 2) + np.arange(rblocks) * block_size
-        col_idx = (block_size // 2) + np.arange(cblocks) * block_size
+        if center_choice == "lower":
+            offset = block_size // 2 - 1  # 4 when B=10
+            if offset < 0:  # for B=1 this would be -1; clamp
+                offset = 0
+        else:  # "upper" (your original behavior)
+            offset = block_size // 2      # 5 when B=10
+
+        row_idx = offset + np.arange(rblocks) * block_size
+        col_idx = offset + np.arange(cblocks) * block_size
 
         block_lat = era5_lats[np.ix_(row_idx, col_idx)]
         block_lon = era5_lons[np.ix_(row_idx, col_idx)]
         return block_lat, block_lon
-
+    
     def save_pixels(self, mm_variables, mod06, mod_geo, misr_cth, era5_variables_misrswath, outputfile_name):
         # 1) Aggregate ERA5 to 10 km
         from os.path import basename
@@ -951,7 +858,6 @@ class MainProcessor:
             missing_flag = 'MISR'
         else:
             missing_flag = 'No Way'
-
         mmcth = XarraySaver(outputfile_name, logger=self.log)
         mmcth.save_mm(
             mm_variables=mm_variables,
@@ -973,63 +879,174 @@ class MainProcessor:
         )
         return
    
-    def valid_pixel_condition(self, bands_BT, mod06, misr_cth):
-        mod_cth = np.asarray(mod06['cth'])
-        misr_cth = np.asarray(misr_cth)  # already an array upstream
+    def convert_misr_cth_ctp(self,era5_variables_misrswath,misr_cth):
+        z_prof = np.asarray(era5_variables_misrswath['geopotential_exp'],
+                            dtype=np.float32)      # (level, x, y)
+        level, nx, ny = z_prof.shape
+        npix_full = nx * ny
+        misr_cth_2d = np.asarray(misr_cth['misrcth'], dtype=np.float32)  # (x, y), meters
+        misr_cth_km = misr_cth_2d / 1e3                                  # km
 
-        # lazy reduce: allocate the boolean once, combine in place
-        mod_bt_all_bands = None
-        for v in bands_BT.values():
-            m = (v > 0)
-            if mod_bt_all_bands is None:
-                mod_bt_all_bands = m
-            else:
-                np.logical_and(mod_bt_all_bands, m, out=mod_bt_all_bands)
-
-        height_diff = mod_cth - misr_cth
-        mod_method = mod06['ctm']
-        return (height_diff > self.cth_diff) & (mod_method == 3) & mod_bt_all_bands & (misr_cth > 0)
+        # ------------------------------------------------------------------
+        # 2) Full-scene MISR CTP via Fortran routine (log-pressure interpolation)
+        # ------------------------------------------------------------------
+        misr_ctp_full = height_to_log_pressure(
+            z_prof,          # (level, x, y)
+            misr_cth_km,     # (x, y) in km
+            np.int32(nx),
+            np.int32(ny)
+        ).astype(np.float32)  # (x, y) in hPa
+        return misr_ctp_full
     
-    def process_pixel_level(self,selected_pixels,bands_BT, mod_geo, misr_cth, era5_variables_misrswath,met_date):
-        z_prof = era5_variables_misrswath['geopotential_exp']
-        # selected_z_prof = z_prof[selected_pixels[0],selected_pixels[1]]     
-        print(f'band bt shape {z_prof.shape}')
-        # Initialize the output array
-        misr_ctp = np.empty_like(misr_cth['misrcth'])
-        misr_ctp = height_to_log_pressure(z_prof, misr_cth['misrcth']/1000., z_prof.shape[1], z_prof.shape[2])
-        bands_BT_arrays = np.array([v for v in bands_BT.values()])
-        
-        selected_sst = era5_variables_misrswath['sst'][selected_pixels[0],selected_pixels[1]] 
-        selected_landsea = mod_geo['landsea'][selected_pixels[0],selected_pixels[1]]  # landsea = 11
-        selected_skintmp = era5_variables_misrswath['skint'][selected_pixels[0],selected_pixels[1]]
-        selected_sp_prof = era5_variables_misrswath['mixingratio_exp'][:, selected_pixels[0],selected_pixels[1]] #Wprof - 1
-        selected_t_prof = era5_variables_misrswath['temperature_exp'][:, selected_pixels[0],selected_pixels[1]] #tprof - 2
-        selected_surfp  = era5_variables_misrswath['surface_pressure'][selected_pixels[0],selected_pixels[1]] /100 # psfc - 3
-        selected_seasurfp  = era5_variables_misrswath['msp'][selected_pixels[0],selected_pixels[1]] /100 # pmsl - 4
-        selected_surftemp = np.copy(selected_sst)
-        selected_surftemp[selected_landsea == 1] =  selected_skintmp[selected_landsea == 1] #surftmp - 5
-        selected_vza  = mod_geo['vza'][selected_pixels[0],selected_pixels[1]] #view -6
-        selected_rad = bands_BT_arrays[5:,selected_pixels[0],selected_pixels[1]]   #tcold -7
-        selected_misrctp = misr_ctp[selected_pixels[0],selected_pixels[1]]  #MISR_CTP - 13
-        selected_lat = mod_geo['lat'][selected_pixels[0],selected_pixels[1]] #latitude -6
-        selected_lon = mod_geo['lon'][selected_pixels[0],selected_pixels[1]] #latitude -6
-        npix = selected_vza.shape[0]  
-        mm_ctp, mm_cee,mm_opt,mm_pflag  = modis.process_selected_pixels(
-            selected_sp_prof,
-            selected_t_prof,
-            selected_surfp, 
-            selected_seasurfp,
-            selected_surftemp, 
-            selected_vza, 
-            selected_rad, 
-            selected_lat,
-            selected_lon,
-            selected_landsea,
-            selected_misrctp,
-            met_date,
-            npix,
-        )   
-        return mm_ctp, mm_cee,mm_opt,mm_pflag
+    def process_pixel_level(self,
+                        bands_BT,
+                        mod06,
+                        mod_geo,
+                        misr_cth,
+                        era5_variables_misrswath,
+                        met_date):
+        """
+        Scene-wide call to modis.process_selected_pixels (Fortran/f2py).
+        This version is careful about dtype + Fortran order to avoid f2py copies.
+        """
+
+        # ----------------------------
+        # 1) Dimensions + MISR CTH/CTP
+        # ----------------------------
+        z_prof = np.asfortranarray(
+            np.asarray(era5_variables_misrswath["geopotential_exp"], dtype=np.float32)
+        )  # (level, nx, ny), F-order
+        level, nx, ny = z_prof.shape
+        npix_full = nx * ny
+
+        misr_cth_2d = np.asfortranarray(
+            np.asarray(misr_cth["misrcth"], dtype=np.float32)
+        )  # (nx, ny), meters
+        misr_cth_km = misr_cth_2d / 1e3
+
+        misr_ctp_full = height_to_log_pressure(
+            z_prof,                  # (level, nx, ny)
+            misr_cth_km,             # (nx, ny)
+            np.int32(nx),
+            np.int32(ny),
+        ).astype(np.float32, copy=False)
+
+        # ----------------------------
+        # 2) Flatten scene arrays (F)
+        # ----------------------------
+        w3 = np.asfortranarray(np.asarray(era5_variables_misrswath["mixingratio_exp"], dtype=np.float32))
+        t3 = np.asfortranarray(np.asarray(era5_variables_misrswath["temperature_exp"], dtype=np.float32))
+        h3 = z_prof  # already F float32
+
+        wprof = w3.reshape(level, npix_full, order="F")
+        tprof = t3.reshape(level, npix_full, order="F")
+        hprof = h3.reshape(level, npix_full, order="F")
+
+        psfc = (np.asfortranarray(np.asarray(era5_variables_misrswath["surface_pressure"], dtype=np.float32)) / 1e2) \
+            .reshape(npix_full, order="F")
+        pmsl = (np.asfortranarray(np.asarray(era5_variables_misrswath["msp"], dtype=np.float32)) / 1e2) \
+            .reshape(npix_full, order="F")
+
+        sst   = np.asfortranarray(np.asarray(era5_variables_misrswath["sst"],   dtype=np.float32)).reshape(npix_full, order="F")
+        skint = np.asfortranarray(np.asarray(era5_variables_misrswath["skint"], dtype=np.float32)).reshape(npix_full, order="F")
+
+        landsea_2d = np.asfortranarray(np.asarray(mod_geo["landsea"], dtype=np.int32))
+        landsea = landsea_2d.reshape(npix_full, order="F")
+
+        view = np.asfortranarray(np.asarray(mod_geo["vza"], dtype=np.float32)).reshape(npix_full, order="F")
+        rlat = np.asfortranarray(np.asarray(mod_geo["lat"], dtype=np.float32)).reshape(npix_full, order="F")
+        rlon = np.asfortranarray(np.asarray(mod_geo["lon"], dtype=np.float32)).reshape(npix_full, order="F")
+
+        surftmp = sst.copy()  # 1D float32
+        surftmp[landsea == 1] = skint[landsea == 1]
+
+        misr_ctp_flat = np.asfortranarray(misr_ctp_full).reshape(npix_full, order="F")
+        bad = (misr_ctp_flat > 1050.0)
+        misr_ctp_flat[bad] = psfc[bad]
+
+        misr_cth_flat = np.asfortranarray(misr_cth_2d).reshape(npix_full, order="F")
+
+        # ----------------------------
+        # 3) MOD06 fields (flatten F)
+        # ----------------------------
+        mod_cth_flat = np.asfortranarray(np.asarray(mod06["cth"], dtype=np.float32)).reshape(npix_full, order="F")
+        mod_ctp_2d   = np.asfortranarray(np.asarray(mod06["ctp"], dtype=np.float32))
+        mod_ctp_flat = mod_ctp_2d.reshape(npix_full, order="F")
+
+        mod_opt_flat = np.asfortranarray(np.asarray(mod06["opt"], dtype=np.float32)).reshape(npix_full, order="F")
+        mod_emi_flat = np.asfortranarray(np.asarray(mod06["emissivity"], dtype=np.float32)).reshape(npix_full, order="F")
+
+        # mod_method: make sure it is int32, no NaNs
+        ctm = np.asarray(mod06["ctm"])
+        if np.issubdtype(ctm.dtype, np.floating):
+            ctm = np.nan_to_num(ctm, nan=69.0, posinf=69.0, neginf=69.0)
+        ctm = np.asfortranarray(ctm)  # keep Fortran layout if 2D
+        mod_method_flat = np.asarray(ctm, dtype=np.int32, order="F").reshape(npix_full, order="F")
+
+        # ----------------------------
+        # 4) Build trad_scene directly: (5, npix_full) F
+        # ----------------------------
+        trad_scene = np.empty((5, npix_full), dtype=np.float32, order="F")
+        # Here we fill row-by-row to avoid building a big (nbands,nx,ny) cube.
+        band_items = list(bands_BT.values())
+        for b in range(5):
+            band2d = np.asfortranarray(np.asarray(band_items[5 + b], dtype=np.float32))
+            trad_scene[b, :] = band2d.reshape(npix_full, order="F")
+
+        # ----------------------------
+        # 5) Clear-sky index list and clr_obs_scene
+        # ----------------------------
+        mod_ctp_nan = mod_ctp_2d.copy()
+        mod_ctp_nan[mod_ctp_nan < 0] = np.nan
+
+        clr_mask = np.isnan(mod_ctp_nan)
+        clr_x, clr_y = np.where(clr_mask)      # 0-based indices (x,y)
+        clr_lin0 = clr_x + nx * clr_y          # 0-based Fortran-linear index
+        cs_idx = (clr_lin0 + 1).astype(np.int32, copy=False)  # 1-based for Fortran
+
+        clr_obs_scene = np.full((5, npix_full), np.nan, dtype=np.float32, order="F")
+        # reuse the already-built trad_scene (same 5 channels)
+        clr_obs_scene[:, clr_lin0] = trad_scene[:, clr_lin0]
+
+        # ----------------------------
+        # 6) Call Fortran
+        # ----------------------------
+        ctp_out, cth_out, emis_out, od_out, qf_out = modis.process_selected_pixels(
+            wprof=wprof,
+            tprof=tprof,
+            hprof=hprof,
+            psfc=psfc,
+            pmsl=pmsl,
+            surftmp=surftmp,
+            view=view,
+            trad=trad_scene,
+            rlat=rlat,
+            rlon=rlon,
+            landsea=landsea,
+            misr_ctp=misr_ctp_flat,
+            misr_cth=misr_cth_flat,
+            mod_cth=mod_cth_flat,
+            mod_ctp=mod_ctp_flat,
+            mod_method=mod_method_flat,
+            mod_opt=mod_opt_flat,
+            mod_emi=mod_emi_flat,
+            met_date=np.asarray(met_date, dtype=np.int32),
+            npix=np.int32(npix_full),
+            clr_obs=clr_obs_scene,
+            cs_idx=cs_idx,
+        )
+
+        # ----------------------------
+        # 7) Reshape back to maps (F)
+        # ----------------------------
+        ctp_map  = np.asarray(ctp_out).reshape(nx, ny, order="F")
+        cth_map  = np.asarray(cth_out).reshape(nx, ny, order="F")
+        emis_map = np.asarray(emis_out).reshape(nx, ny, order="F")
+        od_map   = np.asarray(od_out).reshape(nx, ny, order="F")
+        qf_map   = np.asarray(qf_out).reshape(nx, ny, order="F")
+
+        return ctp_map, cth_map, emis_map, od_map, qf_map
+    
     
     def _nan2d_like(self, geo2d, dtype=np.float32):
         a = np.empty_like(geo2d, dtype=dtype)
@@ -1044,7 +1061,7 @@ class MainProcessor:
         Run the MISR/MODIS/ERA5 data processing pipeline and save outputs.
 
         Parameters:
-            save_flag (str): Indicates the type of output saving strategy. Default is 'debug'.
+            save_flag (str): Indicates the type of output saving strategy. Default is 'not_debug'.
         """
         if self.has_mod06 and self.has_tc:
             file_flag = 'MM'
@@ -1055,27 +1072,25 @@ class MainProcessor:
         else:
             file_flag = 'NW'
 
-
         if self.mm_processor.orbit is not None:
-            outputfile_name =  f'{self.output_dir}MODMISR_L2_CP_061_{self.mm_processor.id}_{self.mm_processor.orbit}_{file_flag}_V00.nc'
+            outputfile_name =  f'{self.output_dir}MODMISR_L2_CP_061_{self.mm_processor.id}_{self.mmdd}_{self.mm_processor.orbit}_{file_flag}_V00.nc'
         elif self.orbit is not None:
-            outputfile_name =  f'{self.output_dir}MODMISR_L2_CP_061_{self.mm_processor.id}_{self.orbit}_{file_flag}_V00.nc'
+            outputfile_name =  f'{self.output_dir}MODMISR_L2_CP_061_{self.mm_processor.id}_{self.mmdd}_{self.orbit}_{file_flag}_V00.nc'
         else:
             return
           
-        
         misr_cth_invalid = -600
         self.log.debug("Running the MISR/MODIS data processing pipeline")
         
         #!  Finish the part results only return two datasets 
         res = self.mm_processor.mm_process(
             process_misr_cth=self.has_tc,
-            process_mod06_cth=self.has_mod06
+            process_mod06_cth=self.has_mod06,
+            scale_flag = save_flag, 
         )
         if res is None:
             self.log.error("Processing MISR/MODIS failed")
             return
-
 
         bands_BT = res['bands_BT']      # may be None
         misr_cth = res['misr_cth']      # may be None (or dict)
@@ -1083,133 +1098,90 @@ class MainProcessor:
         mod06    = res['mod06']    
             
         # # Starting Processing ERA5 data
-
+        # print(mod_geo['lat'].shape,mod_geo['lon'].shape)
         era5_lats_1d, era5_lons_1d = self.era5_processor.era5_lat_lon()
         era5_variables = self.era5_processor.era5_process()
+        
         era5_variables_misrswath = self.era5_processor.map_era5_to_modis(
             mod_geo['lat'], mod_geo['lon'],
             era5_lats_1d.values, era5_lons_1d.values,
             era5_variables
         )
+
+        if era5_variables_misrswath is None:
+            self.log.error(
+                "ERA5->MODIS mapping failed; skipping. "
+                "mod21km =%s mod06=%s mod06=%s misr=%s",
+                self.mod21_file,
+                self.mod06_file,
+                self.mod03_file,
+                self.tccloud_file, 
+            )
+            return None
         del era5_variables #release MEM
 
         self.log.debug("ERA5 processing completed successfully")
           
         # save_flag is for debugging 
         if save_flag == 'debug':
-            output_dir = '/data/keeling/a/gzhao1/f/mmcth/output/'
-            outputfile_name = f'{output_dir}MODMISR_L2_CP_{self.mm_processor.id}_{self.mm_processor.orbit}_debug.nc'
+            outputfile_name = f'{self.output_dir}/debug/MODMISR_L2_CP_{self.mm_processor.id}_{self.mm_processor.orbit}_debug.nc'
             print(outputfile_name)
             mmcth = NetCDFSaver(outputfile_name, self.log)
             mmcth.save_org(bands_BT,misr_cth, mod_geo, mod06,era5_variables_misrswath,outputfile = outputfile_name)
             self.log.debug("Output file saved successfully")                  
             return 
-        
         H, W = mod_geo['lat'].shape
 
         # Initializing the MM Variables 
-        
-        if mod06 is not None:
+        if mod06 is None:
             mm_variables = {
-                'ctp':        np.asarray(mod06['ctp']),          # view
-                'emissivity': np.asarray(mod06['emissivity']),
-                'opt':        np.asarray(mod06['opt']),
-                'cflag':      np.zeros_like(mod06['ctp'], dtype=np.int8),
-                'dflag':      np.zeros_like(mod06['ctp'], dtype=np.int8),
-                'cth':        np.asarray(mod06['cth']),
-            }
-        else:
-            # Allocate shells based on grid shape
-            mm_variables = {
-                'ctp':        self._nan2d_like(mod_geo['lat']),
-                'emissivity': self._nan2d_like(mod_geo['lat']),
-                'opt':        self._nan2d_like(mod_geo['lat']),
-                'cflag':      self._zeros2d_like(mod_geo['lat'], dtype=np.int8),
-                'dflag':      self._zeros2d_like(mod_geo['lat'], dtype=np.int8),
-                'cth':        self._nan2d_like(mod_geo['lat']),
-            }
+                            'ctp':        self._nan2d_like(mod_geo['lat']),
+                            'emissivity': self._nan2d_like(mod_geo['lat']),
+                            'opt':        self._nan2d_like(mod_geo['lat']),
+                            'cflag':      self._zeros2d_like(mod_geo['lat'], dtype=np.int8),
+                            'cth':        self._nan2d_like(mod_geo['lat']),
+                        }
+            misr_arr = misr_cth['misrcth'] if (isinstance(misr_cth, dict) and 'misrcth' in misr_cth) else None
+            if (misr_arr is None) or (np.all(misr_arr) <= misr_cth_invalid) :
+                self.log.error("MISR CTH dict missing 'misrcth'")
+                return
+            else:
+                valid = (misr_arr > self.misr_cth_invalid)
+                mm_variables['cth'][valid]   = misr_arr[valid]
+                misr_ctp = self.convert_misr_cth_ctp(era5_variables_misrswath,misr_cth)
+                mm_variables['ctp'][valid]   = misr_ctp[valid]
+                mm_variables['cflag'][valid] = self.cflag_misr_only
+                self.save_pixels(mm_variables, None, mod_geo, misr_cth, era5_variables_misrswath, outputfile_name)
+                return
+        mod_ctp = np.asarray(mod06['ctp'])
+        mm_variables = {
+            'ctp':        mod_ctp,          # view
+            'emissivity': np.asarray(mod06['emissivity']),
+            'opt':        np.asarray(mod06['opt']),
+            'cflag':      np.zeros_like(mod06['ctp'], dtype=np.int8),
+            'cth':        np.asarray(mod06['cth']),                
+        }        
+        mm_variables['cflag'][mod_ctp>0] = 1   
         
-        for k in ('ctp', 'emissivity', 'opt', 'cth'):
-            mm_variables[k] = mm_variables[k].astype(np.float32, copy=False)
-  
         # === Case: MOD06 only (no MISR CTH) ===
-
-        if misr_cth['misrcth'] is None:
+        if (misr_cth['misrcth'] is None) or (np.all(misr_cth['misrcth']) <= misr_cth_invalid):
             self.log.info("MISR CTH missing; writing MODIS-only product.")
-            valid = (mm_variables['cth'] >= 0)   
-            mm_variables['cflag'][valid] = self.cflag_mod_only
             misr_cth = {}
-            misr_cth['misrcth'] = self._zeros2d_like(mod_geo['lat']) - 888.0 # Need to be modifed 
+            misr_cth['misrcth'] = self._zeros2d_like(mod_geo['lat']) - np.nan# Need to be modifed 
             misr_cth['misrcth_qa'] = self._zeros2d_like(mod_geo['lat'], dtype=np.int8)
             self.save_pixels(mm_variables, mod06, mod_geo, misr_cth, era5_variables_misrswath, outputfile_name)
             return
-        
-        # === Case: MISR only (no MOD06) ===
-        if mod06 is None:
-            self.log.info("MOD06 missing; writing MISR-only product.")
-            misr_arr = misr_cth['misrcth'] if (isinstance(misr_cth, dict) and 'misrcth' in misr_cth) else None
-            if misr_arr is None:
-                self.log.error("MISR CTH dict missing 'misrcth'")
-                return
-            valid = (misr_arr > self.misr_cth_invalid)
-            mm_variables['cth'][valid]   = misr_arr[valid]
-            mm_variables['cflag'][valid] = self.cflag_misr_only
-            # pass mod06=None; save_pixels will normalize it
-            self.save_pixels(mm_variables, None, mod_geo, misr_cth, era5_variables_misrswath, outputfile_name)
-            return
-
-
         # === Case: MISR and MODIS Co-Ex ===
-                
-        if np.all(misr_cth['misrcth'] <= misr_cth_invalid):
-            self.log.debug("No valid MISR CTH or pixel condition; Skip pixel-level processing")
-            mm_variables['cflag'][mod06['cth'] >= 0 ] = self.cflag_mod_only 
-            # mm_variables['cflag'][mod06['cth']>self.mod_cth_invalid] = self.cflag_mod_only  
-            # finish the rest of it with modis orginal opt, cee,ctp...
-            self.save_pixels(mm_variables,mod06, mod_geo, misr_cth, era5_variables_misrswath, outputfile_name)
-            return
-        
-        #  Check if no valid pixels for processing
-        valid_pixels = self.valid_pixel_condition(bands_BT,mod06, misr_cth['misrcth'])  
-        if not np.any(valid_pixels):
-            self.log.debug("No valid pixel for pixel processing condition; Skip pixel-level processing")
-            mm_variables['cth'][misr_cth['misrcth'] > self.misr_cth_invalid] = misr_cth['misrcth'][misr_cth['misrcth'] > self.misr_cth_invalid]
-            mm_variables['cflag'][misr_cth['misrcth'] > self.misr_cth_invalid] = self.cflag_misr_only 
-            self.save_pixels(mm_variables,mod06, mod_geo, misr_cth, era5_variables_misrswath, outputfile_name)
-            return
          
         # Proceed with pixel-level processing  
         
-        self.log.debug("Proceeding with pixel-level processing...")
-    
-        cflag = np.zeros_like(mod06['cth']) + self.cflag_mod_only
-        cflag[misr_cth['misrcth'] > self.misr_cth_invalid] = self.cflag_misr_only
-
-        selected_pixels = np.where(valid_pixels)  
-        rows, cols = selected_pixels  
-        
-    #   mm_ctp,mm_cee,mm_opt,mm_flag = self.process_pixel_level(selected_pixels,bands_BT, mod_geo, misr_cth, era5_variables_misrswath,self.met_date)
-        
-    #     mm_flag[mm_flag<0] = 0
-    #     print(f'The number of selected pixels is {np.size(selected_pixels)}')
-       
-    #     # Extract original and corrected CTP values
-    #     original_cpt = mm_variables['ctp'][rows, cols]
-    #     corrected_cpt = mm_ctp
-
-    #     # Filter valid pixels
-    #     valid_mask = (corrected_cpt != -9999.0) & (~np.isnan(original_cpt))
-    #     original_cpt_valid = original_cpt[valid_mask]
-    #     corrected_cpt_valid = corrected_cpt[valid_mask]
-
-    # #   corrected cpt: {corr}')
-        #Should be done in the main code 
-        # Update mm_variables
-        # mm_variables['ctp'][rows, cols] = mm_ctp
-        # mm_variables['emissivity'][rows, cols] = mm_cee
-        # mm_variables['opt'][rows, cols] = mm_opt
-        # mm_variables['cflag'][rows, cols] = mm_flag.astype(np.int8)
-
+        self.log.debug("Proceeding with pixel-level processing...")     
+        ctp_map,cth_map,emis_map,od_map,qf_map = self.process_pixel_level(bands_BT, mod06,mod_geo, misr_cth, era5_variables_misrswath,self.met_date)
+        mm_variables['ctp']  =  ctp_map
+        mm_variables['cth']  =  cth_map
+        mm_variables['emissivity'] = emis_map
+        mm_variables['opt'] = od_map
+        mm_variables['cflag']= qf_map 
         self.save_pixels(mm_variables, mod06, mod_geo, misr_cth, era5_variables_misrswath, outputfile_name)
         return
 

@@ -67,8 +67,8 @@ contains
 
   tau1 = tau( 1 )
   t1 = temp(  1)
-!  b1 = modis_planck_shift( t1, band, units )
-  b1 = modis_planck( t1, band, units )
+  b1 = modis_planck_shift( t1, band, units )
+!  b1 = modis_planck( t1, band, units )
   rad = 0.0
 !c SWS added refl
   refl = 0.0
@@ -83,8 +83,8 @@ contains
   do i = 2, lsfc
     tau2 = tau( i )
     t2 = temp( i )
-!    b2 = modis_planck_shift( t2, band, units )
-     b2 = modis_planck( t2, band, units )
+    b2 = modis_planck_shift( t2, band, units )
+!    b2 = modis_planck( t2, band, units )
     drad = 0.5 * (b1 + b2) * (tau1 - tau2)
     rad = rad + drad
 
@@ -119,8 +119,8 @@ contains
   endif
 
   rad=rad+(1.-esfc)*refl
-!  bs = modis_planck_shift(tskn, band, units)
-  bs = modis_planck(tskn, band, units)
+  bs = modis_planck_shift(tskn, band, units)
+!  bs = modis_planck(tskn, band, units)
   rad=rad+esfc*bs*taus
   rad=amax1(rad,.001)
 

@@ -40,6 +40,7 @@ real(4), intent(inout) :: T_modis(:,:,:)
 real(4), intent(inout) :: W_modis(:,:,:)
 real(4), intent(inout) :: Z_modis(:,:,:)
 
+! local variables
 integer :: num_era5_levels, num_modis_levels, lat_size, lon_size
 integer :: i, j, k,insert_pos,ilev
 real :: lowest_pressure  
