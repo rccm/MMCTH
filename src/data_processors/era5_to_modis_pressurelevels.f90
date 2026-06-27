@@ -96,7 +96,6 @@ do j = 1, lat_size
         exit
       end if
     end do
-    
     ! Build log_interp_levels with surface_pressure inserted
     log_interp_levels(1:insert_pos-1) = log(era5_levels(1:insert_pos-1))
     log_interp_levels(insert_pos) = log(surface_pressures(j, k))

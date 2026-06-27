@@ -1,0 +1,49 @@
+      SUBROUTINE OPENA_TEMP( PCFNUM, LUN )
+      
+C-----------------------------------------------------------------------
+C
+C !F77
+C
+C !DESCRIPTION:
+C      Open an ASCII sequential formatted temporary file for read-only
+C      using the PGS toolkit.
+C
+C !INPUT PARAMETERS:
+C      PCFNUM    File number in Process Control File.
+C
+C !OUTPUT PARAMETERS:
+C      LUN       Logical unit number assigned to the opened file.
+C
+C !REVISION HISTORY:
+c 01/14/98 fhliang
+c filled in prolog.
+c
+C      04-AUG-1997 Liam Gumley CIMSS/SSEC
+C          Created using OPENA.f as a template.
+C
+c!Team-Unique Header:
+c    Developed by the MODIS Group, CIMSS/SSEC, UW-Madison.
+c
+C !END
+C
+C-----------------------------------------------------------------------
+
+      implicit none
+
+      include 'PGS_IO.f'
+      
+c ... input arguments
+
+      integer pcfnum, lun
+
+c ... local variables
+
+      integer reclen      
+
+c ... open the file for read,direct,unformatted
+      
+      reclen = 1
+      call modis_io_gen_temp_openf( pcfnum, pgsd_io_gen_rseqfrm,
+     &  reclen, lun )
+
+      end

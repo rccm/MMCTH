@@ -1,0 +1,110 @@
+      SUBROUTINE MODIS_IO_GEN_CLOSEF(FILE_PCF_INDEX, FILE_HANDLE)
+
+      IMPLICIT NONE
+      INCLUDE 'PGS_SMF.f'
+      INCLUDE 'PGS_MODIS_39500.f'
+                                             
+C-----------------------------------------------------------------------
+C !F77
+C
+C !DESCRIPTION: 
+C
+C       Subroutine to close a file using the SDP TK generic file 
+C       close function. 
+C
+C !INPUT PARAMETERS:   
+C
+C       FILE_HANDLE - FORTRAN LOGICAL UNIT NUMBER.  THIS IS THE
+C                     NATIVE FORTRAN LOGICAL REFERENCE TO THE FILE.
+C       FILE_PCF_INDEX - THIS IS THE INDEX NUMBER OF THE FILE AS 
+C                        LISTED IN THE PROCESS CONTROL FILE (PCF).
+C
+C !OUTPUT PARAMETERS:  NONE
+C
+C !REVISION HISTORY:  
+c Revision 1.9  1997/10/14  12:28:01  rhucek
+c Removed PGS_PC_* and PGS_IO_* include file statements.
+c
+c Revision 1.8  1996/04/24  17:01:23  vlin
+c put in "!" sign & replaced _F_ with "_W_"
+c
+c Revision 1.7  1995/11/04  01:26:41  rhucek
+c modified prolog
+c
+c Revision 1.6  1995/10/16  13:39:14  vlin
+c removed 'PRINT" statement
+c
+c Revision 1.5  1995/10/16  12:58:05  rhucek
+c Removed status message call to MODIS_SMF_SETDYNAMICMSG before file
+c open operation.
+c
+c Revision 1.4  1995/10/16  12:50:26  rhucek
+c changed routine from FUNCTION to SUBROUTINE
+c
+c Revision 1.3  1995/08/22  14:34:58  vlin
+c updated prolog
+C
+C !TEAM-UNIQUE HEADER: 
+C
+C      THIS SOFTWARE WAS DEVELOPED BY THE MODIS SCIENCE DATA SUPPORT
+C      TEAM FOR THE NATIONAL AERONAUTICS AND SPACE ADMINISTRATION,
+C      GODDARD SPACE FLIGHT CENTER, UNDER CONTRACT NAS5-32373.
+C
+C !REFERENCES AND CREDITS:
+C
+C      WRITTEN BY RICHARD HUCEK
+C      RESEARCH AND DATA SYSTEMS CORPORATION
+C      SAIC/GSC MODIS SCIENCE DATA SUPPORT OFFICE
+C      7501 FORBES BLVD, SEABROOD MD 20706
+C
+C      rhucek@ltpmail.gsfc.nasa.gov
+C
+C !DESIGN NOTES:
+C
+C  EXTERNALS: 
+C
+C    NAMED CONSTANTS:
+C          MODIS_W_GENERIC         (PGS_MODIS_39500.f)
+C          MODIS_S_SUCCESS         (PGS_MODIS_39500.f)
+C          PGS_S_SUCCESS           (PGS_SMF.f)
+C
+C    FUNCTIONS AND SUBROUTINES:
+C          MODIS_SMF_SETDYNAMICMSG
+C          PGS_IO_GEN_CLOSEF       (libPGSTK.a)
+C
+C !END
+C-----------------------------------------------------------------------
+C DECLARATION OF VARIABLES
+
+      CHARACTER*1024 INFO_STRING
+      INTEGER RETURNSTATUS
+      INTEGER FILE_PCF_INDEX
+      INTEGER FILE_HANDLE
+
+C DECLARATION OF FUNCTIONS
+      INTEGER PGS_IO_GEN_CLOSEF
+
+C INITIALIZE VARIABLES 
+      INFO_STRING = ' '
+      RETURNSTATUS = 0
+
+C PUT FILE INDENTIFIER INTO A CHARACTER ARRAY
+      WRITE(INFO_STRING, '(I10)' ) FILE_PCF_INDEX
+
+C CLOSE FILE USING SDPTK GENERIC FILE CLOSE FUNCTION
+      RETURNSTATUS = PGS_IO_GEN_CLOSEF(FILE_HANDLE)
+
+C CHECK RETURNSTATUS OF SDPTK FILE CLOSE CALL AND REPORT SUCCESS/ERROR
+C MESSAGES TO LOG FILES
+
+      IF (RETURNSTATUS .NE. PGS_S_SUCCESS) THEN
+         CALL MODIS_SMF_SETDYNAMICMSG(MODIS_W_GENERIC,
+     &        INFO_STRING, 'MODIS_IO_GEN_CLOSEF')
+      ELSE
+         CALL MODIS_SMF_SETDYNAMICMSG(MODIS_S_SUCCESS,
+     &        INFO_STRING, 'MODIS_IO_GEN_CLOSEF')
+      END IF
+
+      RETURN
+      END
+

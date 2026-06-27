@@ -1,6 +1,6 @@
 #!/bin/bash -l
 #SBATCH -p sesebig
-#SBATCH -J mmcth
+#SBATCH -J mmcth-by-orbit
 #SBATCH -t 48:00:00
 #SBATCH --ntasks=10
 #SBATCH --ntasks-per-node=1
@@ -29,5 +29,5 @@ export OMPI_MCA_tmpdir_base=/data/gdi/f/gzhao1/tmp
  # List of orbits to process, sequentially
 for ORBIT in 82545; do
     echo "=== Processing orbit ${ORBIT} ==="
-    mpirun -n 10 python /data/gdi/f/gzhao1/mmcth/main.py -o "${ORBIT}"
+    mpirun -n "$SLURM_NTASKS" python /data/gdi/f/gzhao1/mmcth/main.py -o "${ORBIT}"
 done

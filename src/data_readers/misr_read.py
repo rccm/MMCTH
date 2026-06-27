@@ -177,11 +177,28 @@ class MISRGranule:
             return self.align_blks(cth,[1,179]), self.align_blks(stereoquality,[1,179])
         else:
             return self.align_blks(cth,[1,179])
+
+    def get_sdcm(self, upscale_factor = 1):
+        cth = self.read_data('StereoDerivedCloudMask')
+        start_blk, end_blk = self.get_block_range()
+        if start_blk > 1:
+            cth[0:start_blk+1,:,:] = 127 #including the starting block
+        if end_blk < 180:
+            cth[end_blk:,:,:] = 127 #including the ending block
+        if  upscale_factor >1: 
+            cth = np.repeat(np.repeat(cth, upscale_factor, axis=1), upscale_factor, axis=2)
+            return self.align_blks(cth,[1,179])
+        else:
+            return self.align_blks(cth,[1,179])
         
     def get_geo(self, upscale_factor = 1):
         latitude = self.read_data('GeoLatitude')
         longitude = self.read_data('GeoLongitude')
         return self.align_blks(latitude,[1,179]), self.align_blks(longitude,[1,179])
+    
+    def get_landmask(self, upscale_factor = 1):
+        landmask = self.read_data('SurfaceFeatureID')
+        return self.align_blks(landmask,[1,179]) 
     
     def get_block_range(self):
         hdf = SD.SD(self.file_path)

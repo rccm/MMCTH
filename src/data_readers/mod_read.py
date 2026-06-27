@@ -5,7 +5,9 @@ from pyhdf.VS import *
 import numpy as np
 import re
 import os
-from datetime import datetime
+from datetime import datetime,timezone, timedelta 
+
+
 class MODL1Granule():
     def __init__(self, mod_l1b_fullpath,destripe_flag=True):
         self.fullpath = mod_l1b_fullpath  # Use the passed full path
@@ -663,7 +665,37 @@ class MOD06Granule():
     
     def get_ctm(self):
         return self.get_data('cloud_top_method_1km') 
-                             
+
+    def get_multi(self):
+        return self.get_data('Cloud_Multi_Layer_Flag')
+    
+    def get_qa(self):
+        """
+        Read MOD06 Quality_Assurance_1km as raw packed bytes.
+
+        Returns
+        -------
+        np.ndarray
+            Shape (ny, nx, 9), dtype int8.
+        """
+        hdf_file = SD(self.fullpath, SDC.READ)
+        try:
+            sds = hdf_file.select("Quality_Assurance_1km")
+            qa = sds.get()  # raw packed bytes
+
+            if np.ma.isMaskedArray(qa):
+                qa = qa.filled(0)
+
+            qa = np.asarray(qa)
+
+            # Keep raw byte values; do NOT scale or apply valid_range masking
+            if qa.dtype != np.int8:
+                qa = qa.astype(np.int8, copy=False)
+
+            return qa
+        finally:
+            hdf_file.end()
+                  
     def get_cphase(self):
         '''
         0: Cloud Mask unavaible, missing data
@@ -735,33 +767,55 @@ class MOD06Granule():
         # cth = self.get_cth()
         # emiss_1km = self.get_data('Cloud_Effective_Emissivity',upscale_1km = upscale_1km,target_like=cth) 
         return self.get_data('cloud_emissivity_1km') 
-          
-class MOD03Granule():
+
+class MOD03Granule:
     def __init__(self, mod_l1b_fullpath):
-        self.fullpath = mod_l1b_fullpath  # Use the passed full path
-    def get_data(self, fieldname,scale_factor_flag = True):
-        hdf_file = SD(self.fullpath)
-        data = hdf_file.select(fieldname)
-        if scale_factor_flag:
-            scale_factor = data.attributes()['scale_factor']
+        self.fullpath = mod_l1b_fullpath
+
+        # simple caches so repeated calls do not reread the same SDSs
+        self._cache = {}
+
+    def get_data(self, fieldname, scale_factor_flag=True):
+        hdf_file = SD(self.fullpath, SDC.READ)
+        try:
+            data = hdf_file.select(fieldname)
             data_value = data.get()
-            return data_value*scale_factor
-        else:
-            return data[()]
+
+            if scale_factor_flag and "scale_factor" in data.attributes():
+                scale_factor = data.attributes()["scale_factor"]
+                data_value = data_value * scale_factor
+
+            return data_value
+        finally:
+            hdf_file.end()
+
+    def list_sds_names(self):
+        hdf_file = SD(self.fullpath, SDC.READ)
+        try:
+            return list(hdf_file.datasets().keys())
+        finally:
+            hdf_file.end()
+
     def get_sza(self):
-        return self.get_data('SolarZenith')  
+        return self.get_data("SolarZenith")
+
     def get_saa(self):
-        return self.get_data('SolarAzimuth')
+        return self.get_data("SolarAzimuth")
+
     def get_vza(self):
-        return self.get_data('SensorZenith')
+        return self.get_data("SensorZenith")
+
     def get_vaa(self):
-        return self.get_data('SensorAzimuth')
+        return self.get_data("SensorAzimuth")
+
     def get_lat(self):
-        return self.get_data('Latitude',scale_factor_flag=False)
+        return self.get_data("Latitude", scale_factor_flag=False)
+
     def get_lon(self):
-        return self.get_data('Longitude',scale_factor_flag=False)
-    def get_landsea_mask(self,binary_output=True):
-        '''
+        return self.get_data("Longitude", scale_factor_flag=False)
+
+    def get_landsea_mask(self, binary_output=True):
+        """
         0: Shallow ocean
         1: Land
         2: Coastline
@@ -770,23 +824,235 @@ class MOD03Granule():
         5: Deep inland water
         6: Moderate or continental ocean
         7: Deep ocean
-        '''
-        landsea_mask = self.get_data('Land/SeaMask', scale_factor_flag=False)
+        """
+        landsea_mask = self.get_data("Land/SeaMask", scale_factor_flag=False)
+
         if binary_output:
-            # Initialize a binary mask with default value of 0 (non-land)
             binary_mask = np.zeros_like(landsea_mask, dtype=int)
-            
-            # Set binary values: 1 for land (value 1), 2 for coastline (value 2)
             binary_mask[landsea_mask == 1] = 1
             binary_mask[landsea_mask == 2] = 2
-            
             return binary_mask
-        
-        # Return the original Land/SeaMask values if binary_output is False
+
         return landsea_mask
 
+    # -----------------------------
+    # Cached MOD03 timing SDS readers
+    # -----------------------------
+    def get_scan_number(self):
+        if "Scan number" not in self._cache:
+            self._cache["Scan number"] = self.get_data(
+                "Scan number", scale_factor_flag=False
+            ).astype(np.int32)
+        return self._cache["Scan number"]
 
-if __name__ == "__main__":
-    a = MOD06Granule('/data/gdi/d/MOD06/2002/203/MOD06_L2.A2002203.2315.061.2017280021147.hdf')
-    b = a.get_ctp(upscale_factor = 5)
-    print(b.shape)
+    def get_ev_frames(self):
+        if "EV frames" not in self._cache:
+            self._cache["EV frames"] = self.get_data(
+                "EV frames", scale_factor_flag=False
+            ).astype(np.int32)
+        return self._cache["EV frames"]
+
+    def get_ev_start_time(self):
+        if "EV start time" not in self._cache:
+            arr = self.get_data("EV start time", scale_factor_flag=False).astype(np.float64)
+            arr[arr <= -1.0e9] = np.nan
+            self._cache["EV start time"] = arr
+        return self._cache["EV start time"]
+
+    def get_ev_center_time(self):
+        if "EV center time" not in self._cache:
+            arr = self.get_data("EV center time", scale_factor_flag=False).astype(np.float64)
+            arr[arr <= -1.0e9] = np.nan
+            self._cache["EV center time"] = arr
+        return self._cache["EV center time"]
+
+    def get_mirror_side(self):
+        if "Mirror side" not in self._cache:
+            self._cache["Mirror side"] = self.get_data(
+                "Mirror side", scale_factor_flag=False
+            ).astype(np.int16)
+        return self._cache["Mirror side"]
+
+    # -----------------------------
+    # Time conversion helpers
+    # -----------------------------
+    @staticmethod
+    def _tai_minus_utc_for_utc_date(dt_utc):
+        """
+        Return TAI-UTC (seconds) for a UTC datetime.
+        """
+        leap_table = [
+            (datetime(1993, 1, 1, tzinfo=timezone.utc), 27),
+            (datetime(1993, 7, 1, tzinfo=timezone.utc), 28),
+            (datetime(1994, 7, 1, tzinfo=timezone.utc), 29),
+            (datetime(1996, 1, 1, tzinfo=timezone.utc), 30),
+            (datetime(1997, 7, 1, tzinfo=timezone.utc), 31),
+            (datetime(1999, 1, 1, tzinfo=timezone.utc), 32),
+            (datetime(2006, 1, 1, tzinfo=timezone.utc), 33),
+            (datetime(2009, 1, 1, tzinfo=timezone.utc), 34),
+            (datetime(2012, 7, 1, tzinfo=timezone.utc), 35),
+            (datetime(2015, 7, 1, tzinfo=timezone.utc), 36),
+            (datetime(2017, 1, 1, tzinfo=timezone.utc), 37),
+        ]
+
+        tai_minus_utc = leap_table[0][1]
+        for eff_date, val in leap_table:
+            if dt_utc >= eff_date:
+                tai_minus_utc = val
+            else:
+                break
+        return tai_minus_utc
+
+    @staticmethod
+    def _native_mod03_to_seconds_since_2000(native_seconds):
+        """
+        Convert native MOD03 EV times to UTC-based
+        seconds since 2000-01-01T00:00:00Z.
+
+        Assumes MOD03 EV times are TAI93-like seconds:
+        seconds since 1993-01-01 on the MODIS TAI-related timescale.
+        """
+        arr = np.asarray(native_seconds, dtype=np.float64)
+        out = np.full(arr.shape, np.nan, dtype=np.float64)
+
+        epoch_1993_utc = datetime(1993, 1, 1, tzinfo=timezone.utc)
+        epoch_2000_utc = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+        # At 1993-01-01 UTC, TAI-UTC = 27 s
+        tai_minus_utc_at_1993_epoch = 27.0
+
+        flat_in = arr.ravel()
+        flat_out = out.ravel()
+
+        for i, x in enumerate(flat_in):
+            if not np.isfinite(x):
+                continue
+
+            # first guess using epoch offset only
+            utc_guess = epoch_1993_utc.timestamp() + (x - tai_minus_utc_at_1993_epoch)
+            dt_guess = datetime.fromtimestamp(utc_guess, tz=timezone.utc)
+
+            tai_minus_utc_now = MOD03Granule._tai_minus_utc_for_utc_date(dt_guess)
+
+            # convert native TAI93-like seconds to UTC seconds
+            utc_seconds = epoch_1993_utc.timestamp() + (
+                x - (tai_minus_utc_now - tai_minus_utc_at_1993_epoch)
+            )
+
+            flat_out[i] = utc_seconds - epoch_2000_utc.timestamp()
+
+        return out
+
+    # -----------------------------
+    # Time array builders
+    # -----------------------------
+    def get_time_2d_native(self, use_center_time=True, fps=3000.0):
+        """
+        Original loop-based version.
+        Returns shape (nscans*10, mframes) in native MOD03 time units.
+        """
+        ev_frames = self.get_ev_frames()
+        nscans = ev_frames.size
+        nrows = nscans * 10
+        max_frames = int(ev_frames.max())
+
+        if use_center_time:
+            t_scan = self.get_ev_center_time()
+        else:
+            t_scan = self.get_ev_start_time()
+
+        time2d = np.full((nrows, max_frames), np.nan, dtype=np.float64)
+
+        for iscan in range(nscans):
+            nframes = int(ev_frames[iscan])
+
+            if nframes <= 0 or np.isnan(t_scan[iscan]):
+                continue
+
+            frame_idx = np.arange(nframes, dtype=np.float64)
+
+            if use_center_time:
+                frame_times = t_scan[iscan] + (frame_idx - (nframes - 1) / 2.0) / fps
+            else:
+                frame_times = t_scan[iscan] + (frame_idx + 0.5) / fps
+
+            row0 = iscan * 10
+            row1 = row0 + 10
+            time2d[row0:row1, :nframes] = frame_times[None, :]
+
+        return time2d
+
+    def get_time_2d_since_2000_fast(self, use_center_time=True, fps=3000.0):
+        """
+        Pixel observation time was derived from the matched MOD03 geolocation granule. MOD03 provides the Earth-view center time for each scan, 
+        and the MODIS scan geometry provides the number of Earth-view frames within each scan together with the frame sampling rate.
+        Using the scan center time as the reference, a time offset was calculated for each cross-track frame,
+        yielding a time for each frame within the scan. 
+        That frame time was then assigned to the corresponding pixels and replicated across the 10 along-track detector rows associated with that scan as a scan-level approximation. 
+        The resulting time field was then converted to UTC-based seconds since 2000-01-01 00:00:00 for storage in the MM product.
+        """
+        ev_frames = self.get_ev_frames().astype(np.int32)
+        nscans = ev_frames.size
+        nrows = nscans * 10
+        max_frames = int(ev_frames.max())
+
+        if use_center_time:
+            t_scan_native = self.get_ev_center_time()
+        else:
+            t_scan_native = self.get_ev_start_time()
+
+        t_scan_2000 = self._native_mod03_to_seconds_since_2000(t_scan_native)
+
+        # frame index array: shape (1, max_frames)
+        frame_idx = np.arange(max_frames, dtype=np.float64)[None, :]
+
+        # number of valid frames per scan: shape (nscans, 1)
+        nframes2d = ev_frames[:, None].astype(np.float64)
+
+        if use_center_time:
+            offsets = (frame_idx - (nframes2d - 1) / 2.0) / fps
+        else:
+            offsets = (frame_idx + 0.5) / fps
+        scan_frame_time = t_scan_2000[:, None] + offsets
+
+        # mask columns beyond EV frames for each scan
+        valid = frame_idx < nframes2d
+        scan_frame_time = np.where(valid, scan_frame_time, np.nan)
+
+
+        time2d = np.repeat(scan_frame_time, 10, axis=0)
+
+        if time2d.shape != (nrows, max_frames):
+            raise ValueError(
+                f"Unexpected time2d shape {time2d.shape}, expected {(nrows, max_frames)}"
+            )
+
+        return time2d
+
+    def get_time_2d_since_2000(self, use_center_time=True, fps=3000.0, fast=True):
+        """
+        Main public 2D method.
+        """
+        if fast:
+            return self.get_time_2d_since_2000_fast(
+                use_center_time=use_center_time, fps=fps
+            )
+
+        time2d_native = self.get_time_2d_native(
+            use_center_time=use_center_time, fps=fps
+        )
+        return self._native_mod03_to_seconds_since_2000(time2d_native)
+
+    def get_time_1d_since_2000(self, use_center_time=True):
+        """
+        Fast 1D along-track time array of length nscans*10.
+
+        One representative scan time is assigned to each set of 10 rows.
+        """
+        if use_center_time:
+            t_scan_native = self.get_ev_center_time()
+        else:
+            t_scan_native = self.get_ev_start_time()
+
+        t_scan_2000 = self._native_mod03_to_seconds_since_2000(t_scan_native)
+        return np.repeat(t_scan_2000, 10) 

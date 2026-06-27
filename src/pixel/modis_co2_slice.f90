@@ -27,6 +27,45 @@ module co2
   integer jdet
   real emisrw, emadj(nsct)
 
+! MM diagnostic failure / status reasons used by MM_FailureReason.
+  integer, parameter :: mm_ok = 0
+  integer, parameter :: mm_not_attempted = 10
+  integer, parameter :: mm_invalid_misr_ctp = 20
+  integer, parameter :: mm_invalid_surface_pressure = 21
+  integer, parameter :: mm_invalid_modis_radiance = 22
+  integer, parameter :: mm_invalid_profile = 23
+  integer, parameter :: mm_pressure_grid_error = 24
+  integer, parameter :: mm_no_vertical_search = 30
+  integer, parameter :: mm_signal_below_noise = 40
+  integer, parameter :: mm_no_valid_ratio = 41
+  integer, parameter :: mm_no_ratio_crossing = 42
+  integer, parameter :: mm_candidate_not_above_misr = 50
+  integer, parameter :: mm_candidate_outside_band_range = 51
+  integer, parameter :: mm_no_selectable_band_pair = 52
+  integer, parameter :: mm_candidate_not_higher_than_1layer = 60
+  integer, parameter :: mm_reference_1layer_failed = 61
+  integer, parameter :: mm_candidate_no_ctp_digit = 62
+  integer, parameter :: mm_ctp_ok_emis_den_bad = 70
+  integer, parameter :: mm_ctp_ok_emis_ratio_bad = 71
+
+! Per-band-pair diagnostic status.
+  integer, parameter :: pair_not_evaluated = 0
+  integer, parameter :: pair_skipped_signal = 1
+  integer, parameter :: pair_no_valid_ratio = 2
+  integer, parameter :: pair_no_crossing = 3
+  integer, parameter :: pair_crossing_found = 4
+  integer, parameter :: pair_selected = 5
+
+! Diagnostics from the most recent co2cld_onepixel_misr_reason call.
+  integer :: dbg_failure_reason, dbg_processing_mask
+  integer :: dbg_isp, dbg_imisr, dbg_ltrp, dbg_lco2, dbg_ipco2
+  integer :: dbg_krto(nsct), dbg_pair_status(nsct)
+  real :: dbg_tcold(nbct), dbg_robs(nbct), dbg_rclr(nbct), dbg_delr(nbct)
+  real :: dbg_ra(plev,nbct), dbg_taup(plev,nbct)
+  real :: dbg_tpad(plev), dbg_wpad(plev), dbg_ozpad(plev)
+  real :: dbg_lev(nsct), dbg_ctp_pres(nsct)
+  real :: dbg_tmisr, dbg_num, dbg_den, dbg_ratio, dbg_pfco2, dbg_rwcld
+
 ! LEGACY: Ice cloud emissivity adjustments for each channel combination.
   data emadj / 1.000, 1.000, 1.000, 1.000 /
 
@@ -71,13 +110,14 @@ module co2
 
 end module co2
 
-subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, &
+subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp, view, &
                                 trad, met_date, rlat, rlon, landsea, misr_ctp, &
                                 Cloud_Top_Pressure, &
                                 Cloud_Top_Height, &
                                 Cloud_Effective_Emissivity, &
                                 Cloud_Optical_Depth, &
-                                Processing_Mask)
+                                Processing_Mask, &
+                                Failure_Reason)
 !-------------------------------------------------------------------------------
 ! Name: co2cld_onepixel_misr
 !
@@ -119,6 +159,25 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
 
 !   - Processing Flag Logic: For each call to co2cld_onepixel_misr:
 !
+! 000
+! no CTP, no emissivity
+! 010
+! 2-layer CTP from 36/35, no emissivity
+! 012
+! 2-layer CTP from 36/35, emissivity from 2-layer call
+! 020
+! 2-layer CTP from 35/33, no emissivity
+! 022
+! 2-layer CTP from 35/33, emissivity from 2-layer call
+! 100
+! 1-layer CTP from 36/35, no emissivity
+! 101
+! 1-layer CTP from 36/35, emissivity from 1-layer call
+! 200
+! 1-layer CTP from 35/33, no emissivity
+! 201
+! 1-layer CTP from 35/33, emissivity from 1-layer call
+
 !    1st digit (A) — 1-layer CTP (this call only if misr_ctp ≈ psfc)
 !
 !    0: no 1-layer CTP (or this call is 2-layer)
@@ -142,7 +201,22 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
 !-------------------------------------------------------------------------------
 
   use co2, only: nbct, plev, pp, nb_wavelen, ntbct, mbnds, jdet, freq, &
-                 kch, nsct, rmin, emadj, badvalue, emisrw
+                 kch, nsct, rmin, emadj, badvalue, emisrw, &
+                 mm_ok, mm_invalid_misr_ctp, mm_invalid_surface_pressure, &
+                 mm_invalid_modis_radiance, mm_invalid_profile, &
+                 mm_pressure_grid_error, mm_no_vertical_search, &
+                 mm_signal_below_noise, mm_no_valid_ratio, &
+                 mm_no_ratio_crossing, mm_candidate_not_above_misr, &
+                 mm_candidate_outside_band_range, mm_no_selectable_band_pair, &
+                 mm_ctp_ok_emis_den_bad, &
+                 mm_ctp_ok_emis_ratio_bad, pair_not_evaluated, &
+                 pair_skipped_signal, pair_no_valid_ratio, pair_no_crossing, &
+                 pair_crossing_found, pair_selected, dbg_failure_reason, &
+                 dbg_processing_mask, dbg_isp, dbg_imisr, dbg_ltrp, dbg_lco2, &
+                 dbg_ipco2, dbg_krto, dbg_pair_status, dbg_tcold, dbg_robs, &
+                 dbg_rclr, dbg_delr, dbg_ra, dbg_taup, dbg_tpad, dbg_wpad, &
+                 dbg_ozpad, dbg_lev, dbg_ctp_pres, dbg_tmisr, dbg_num, &
+                 dbg_den, dbg_ratio, dbg_pfco2, dbg_rwcld
   use, intrinsic :: ieee_arithmetic
   use transmission, only: tran_modisd101, wstd,tstd
   use surfemis, only: getiremis, assign_eco_emis
@@ -170,10 +244,12 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
   real, intent(out) :: Cloud_Effective_Emissivity ! Upper cloud effective emissivity
   real, intent(out) :: Cloud_Optical_Depth
   integer, intent(out) :: Processing_Mask       ! Quality flag
+  integer, intent(out) :: Failure_Reason
 
 ! Local variables
   real :: tcold(nbct)  
   integer :: ltrp, isp, imisr, imslp, ll, k, id, lmin, lco2,jday
+  integer :: prof_end
   integer ::lwin, iw1 
   integer :: date2doy   
   integer :: nl                     ! Level where water/temperature profiles = 0
@@ -207,18 +283,23 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
   real :: tau_vis 
   integer :: digit1, digit2, digit3 ! three digits of the Processing Flag
   logical :: is_one_layer_call ! Logical flag to figure out if MISR or SFC Pressure used
+  logical :: valid_ratio
+  logical :: pair1_cross, pair2_cross, pair3_cross, pair4_cross
 
 ! Initialize Processing Flag Pipeline
   digit1 = 0
   digit2 = 0
   digit3 = 0
+  Failure_Reason = mm_ok
+
+  Cloud_Top_Height = -9999.0
 
   is_one_layer_call = (abs(misr_ctp - psfc) <= 1.0)
 
   found_solution   = .false.
   Processing_Mask  = 0
 
-  
+
 ! Initialize outputs
   Cloud_Top_Pressure = badvalue
   Cloud_Effective_Emissivity = badvalue
@@ -227,24 +308,81 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
 !  Processing_Mask = 3
   ctp_flag = 0
   ctp_pres = badvalue
-   
-  do k = 1, nbct
-     tcold(k) = modis_bright_shift(trad(k),mbnds(k), 1)
-  end do 
+  tcold = badvalue
+  robs = badvalue
+  rclr = badvalue
+  delr = badvalue
+  ra = badvalue
+  taup = badvalue
+  ipco2 = 0
+  lco2 = 0
+  pfco2 = badvalue
+  num = badvalue
+  den = badvalue
+  ratio = badvalue
+  rwcld = badvalue
+  lev = badvalue
+  krto = 0
+
+! Reset last-call diagnostics.
+  dbg_failure_reason = mm_ok
+  dbg_processing_mask = 0
+  dbg_isp = 0
+  dbg_imisr = 0
+  dbg_ltrp = 0
+  dbg_lco2 = 0
+  dbg_ipco2 = 0
+  dbg_krto = 0
+  dbg_pair_status = pair_not_evaluated
+  dbg_tcold = badvalue
+  dbg_robs = badvalue
+  dbg_rclr = badvalue
+  dbg_delr = badvalue
+  dbg_ra = badvalue
+  dbg_taup = badvalue
+  dbg_tpad = badvalue
+  dbg_wpad = badvalue
+  dbg_ozpad = badvalue
+  dbg_lev = badvalue
+  dbg_ctp_pres = badvalue
+  dbg_tmisr = badvalue
+  dbg_num = badvalue
+  dbg_den = badvalue
+  dbg_ratio = badvalue
+  dbg_pfco2 = badvalue
+  dbg_rwcld = badvalue
+
 !-------------------------------------------------------------------------------
 ! Validate inputs
 !-------------------------------------------------------------------------------
-  if (misr_ctp <= 0.0 .or. misr_ctp > psfc .or. misr_ctp < pp(1)) then
-    write(*,'(A,F10.2,F10.2,F10.2,A)') 'ERROR: Invalid misr_ctp = ', misr_ctp, psfc, pp(1), &
-                           ' hPa, returning badvalue'
+  if ((.not. ieee_is_finite(misr_ctp)) .or. misr_ctp <= 0.0 .or. &
+      misr_ctp > psfc .or. misr_ctp < pp(1)) then
+    ! write(*,'(A,F10.2,F10.2,F10.2,A)') 'ERROR: Invalid misr_ctp = ', misr_ctp, psfc, pp(1), &
+    !                        ' hPa, returning badvalue'
+    Failure_Reason = mm_invalid_misr_ctp
+    dbg_failure_reason = Failure_Reason
     return
   endif
-  if (psfc <= pp(1) .or. psfc > 1100.0) then
-    write(*,'(A,F10.2,A)') 'ERROR: Invalid psfc = ', psfc, ' hPa, returning badvalue'
+  if ((.not. ieee_is_finite(psfc)) .or. psfc <= pp(1) .or. psfc > 1100.0) then
+    ! write(*,'(A,F10.2,A)') 'ERROR: Invalid psfc = ', psfc, ' hPa, returning badvalue'
+    Failure_Reason = mm_invalid_surface_pressure
+    dbg_failure_reason = Failure_Reason
     return
   endif
-  if (any(tcold <= 0.0)) then
-    write(*,'(A)') 'ERROR: Invalid tcold values, returning badvalue'
+  if (any(.not. ieee_is_finite(trad)) .or. any(trad <= 0.0)) then
+    Failure_Reason = mm_invalid_modis_radiance
+    dbg_failure_reason = Failure_Reason
+    return
+  endif
+
+  do k = 1, nbct
+     tcold(k) = modis_bright_shift(trad(k),mbnds(k), 1)
+  end do
+  dbg_tcold = tcold
+  if (any(.not. ieee_is_finite(tcold)) .or. any(tcold <= 0.0)) then
+    ! write(*,'(A)') 'ERROR: Invalid tcold values, returning badvalue'
+    Failure_Reason = mm_invalid_modis_radiance
+    dbg_failure_reason = Failure_Reason
     return
   endif
 
@@ -265,10 +403,13 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
     end if
   enddo
   if (isp == 0) then
-    write(*,'(A,F10.2,A)') 'ERROR: Cannot find isp for psfc = ', psfc, &
-                           ' hPa, returning badvalue'
+    ! write(*,'(A,F10.2,A)') 'ERROR: Cannot find isp for psfc = ', psfc, &
+    !                        ' hPa, returning badvalue'
+    Failure_Reason = mm_pressure_grid_error
+    dbg_failure_reason = Failure_Reason
     return
   endif
+  dbg_isp = isp
 ! MISR CTP level
   imisr = 0
   do ll = 1, plev
@@ -278,11 +419,23 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
     end if
   enddo
   if (imisr == 0) then
-    write(*,'(A,F10.2,A)') 'ERROR: Cannot find imisr for misr_ctp = ', misr_ctp, &
-                           ' hPa, returning badvalue'
+    ! write(*,'(A,F10.2,A)') 'ERROR: Cannot find imisr for misr_ctp = ', misr_ctp, &
+    !                        ' hPa, returning badvalue'
+    Failure_Reason = mm_pressure_grid_error
+    dbg_failure_reason = Failure_Reason
     return
   endif
+  dbg_imisr = imisr
   is1  = imisr - 1
+
+  prof_end = max(1, imisr - 1)
+  if (any(.not. ieee_is_finite(tprof(1:prof_end))) .or. any(tprof(1:prof_end) <= 0.0) .or. &
+      any(.not. ieee_is_finite(wprof(1:prof_end))) .or. any(wprof(1:prof_end) < 0.0) .or. &
+      any(.not. ieee_is_finite(hprof(1:prof_end)))) then
+    Failure_Reason = mm_invalid_profile
+    dbg_failure_reason = Failure_Reason
+    return
+  endif
 
 ! Mean sea level pressure level (for height calculation): is this nessary?
   imslp = 0
@@ -294,7 +447,7 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
   enddo
   if (imslp == 0) then
     imslp = isp
-    write(*,'(A,F10.2,A)') 'WARNING: Using isp for imslp, pmsl = ', pmsl, ' hPa'
+    ! write(*,'(A,F10.2,A)') 'WARNING: Using isp for imslp, pmsl = ', pmsl, ' hPa'
   endif
 ! ! First level with water/temperature profiles = 0
 !   nl = 0
@@ -325,10 +478,14 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
   if (ltrp < 2) ltrp = 2  
   ptrp = pp(ltrp)
   if (ltrp >= imisr) then
-    write(*,'(A,I3,A,F10.2,A)') 'ERROR: Tropopause level ', ltrp, &
-                                ' at ', ptrp, ' hPa below misr_ctp, returning badvalue'
+    ! write(*,'(A,I3,A,F10.2,A)') 'ERROR: Tropopause level ', ltrp, &
+    !                             ' at ', ptrp, ' hPa below misr_ctp, returning badvalue'
+    Failure_Reason = mm_no_vertical_search
+    dbg_failure_reason = Failure_Reason
+    dbg_ltrp = ltrp
     return
   endif
+  dbg_ltrp = ltrp
 !  write(*,*) imisr, isp, pp(imisr), pp(isp)
 !-------------------------------------------------------------------------------
 ! Compute auxiliary profiles
@@ -358,12 +515,16 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
   !if (tmisr < 0) then
   !  tmisr = surftmp
   !endif
-  
+
   do ll = imisr-1, plev       ! layers that are physically below the terrain
     tpad(ll)  = tmisr        ! hold at surface T
     wpad(ll)  = 0.0        ! zero vapour → negligible extra τ
     ozpad(ll) = 0.0
   end do 
+  dbg_tmisr = tmisr
+  dbg_tpad = tpad
+  dbg_wpad = wpad
+  dbg_ozpad = ozpad
    
   jday = date2doy( met_date(1), met_date(2), met_date(3) )
 
@@ -376,7 +537,8 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
         write(*,*) 'ERORR: Transmittance for ',  mbnds(k), ': ', taup(1,k)
     endif
   enddo
-  
+  dbg_taup = taup(:,1:nbct)
+
   ! 2.  Clear / cloudy radiances and reference terms  -----------------------------
   do k = 1, nbct - 1
      robs(k) = modis_planck_shift( tcold(k), mbnds(k), 0 )
@@ -395,6 +557,10 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
         ra(ll,k) = sum
      end do
   end do
+  dbg_robs = robs
+  dbg_rclr = rclr
+  dbg_delr = delr
+  dbg_ra = ra
   
   !write(*,'("Pressure levels: trop=",i3,"  Pl=",i3,"  ptrop=",f7.2,"  Pmisr=",f7.2)') &
   !        ltrp, imisr, pp(ltrp), pp(imisr)
@@ -406,13 +572,22 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
   pair_loop: do id = 1, nsct
      k1 = kch(id,1)
      k2 = kch(id,2)
+
+     if ((.not. ieee_is_finite(delr(k1))) .or. (.not. ieee_is_finite(delr(k2)))) then
+        dbg_pair_status(id) = pair_no_valid_ratio
+        cycle
+     end if
   
      ! Skip pair if clear–cloud signals are below noise threshold
-     if (delr(k1) > rmin(k1)+101 .or. delr(k2) > rmin(k2)+101) cycle
+     if (delr(k1) > rmin(k1) .or. delr(k2) > rmin(k2)) then
+        dbg_pair_status(id) = pair_skipped_signal
+        cycle
+     end if
   
     !  write(*,'("Working on Pair:",i2)') id
      ok    = .false.
      start = .false.
+     valid_ratio = .false.
   
      do ll = ltrp, imisr              ! search downward until the MISR layer
         if (delr(k2) == 0.0  .or. ra(ll,k2) == 0.0) cycle     ! avoid /0
@@ -420,7 +595,8 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
         fm1 = delr(k1)              / delr(k2)
         fm2 = ra(ll,k1) * emadj(id) / ra(ll,k2)
   
-        if (ieee_is_nan(fm1) .or. ieee_is_nan(fm2)) cycle
+        if ((.not. ieee_is_finite(fm1)) .or. (.not. ieee_is_finite(fm2))) cycle
+        valid_ratio = .true.
   
         fm  = fm1 - fm2
         neg = fm < 0.0
@@ -435,17 +611,45 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
   
      if (ok) then
         krto(id) = 1
-        lev(id)  = max( 1, min( plev, int(lev(id)) ) )
-        ctp_pres(id) = pp(lev(id)-1)
+        lev(id)  = max( 2, min( plev, int(lev(id)) ) )
+        ctp_pres(id) = pp(int(lev(id))-1)
+        dbg_pair_status(id) = pair_crossing_found
      else
         krto(id)     = 0
         lev(id)      = badvalue
         ctp_pres(id) = badvalue
+        if (valid_ratio) then
+           dbg_pair_status(id) = pair_no_crossing
+        else
+           dbg_pair_status(id) = pair_no_valid_ratio
+        end if
      end if
   end do pair_loop
+  dbg_krto = krto
+  dbg_lev = lev
+  dbg_ctp_pres = ctp_pres
   
 !-------------------------------------------------------------------------------
 ! Select best CTP (top-down: 36/35, 35/34, 35/33, 33/33)
+!-------------------------------------------------------------------------------
+!-------------------------------------------------------------------------------
+! Select best CTP using MODIS CO2-slicing top-down constraints.
+!
+! MOD06 C6 restricts candidate CTP ranges by CO2 band pair:
+!   36/35 < 450 hPa
+!   35/34 < 550 hPa
+!   34/33 < 650 hPa
+!   35/33 < 650 hPa
+!
+! Terra MODIS has severe band-34 noise, so operational Terra logic uses
+! only 36/35 and 35/33.  Therefore this MISR-assisted Terra implementation
+! accepts:
+!   id=1: 36/35 only if CTP < 450 hPa
+!   id=3: 35/33 only if CTP < 650 hPa
+!
+! The additional condition ctp_pres(id) < misr_ctp enforces the MISR-assisted
+! two-layer interpretation: the retrieved CO2-slicing cloud must be above
+! the MISR lower-cloud pressure.
 !-------------------------------------------------------------------------------
   do id = 1, nsct
     if (krto(id) == 1 .and. ctp_pres(id) /= badvalue) then
@@ -457,23 +661,59 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
         found_solution = .true.
         Cloud_Top_Pressure = pp(lco2) 
         Cloud_Top_Height = hprof(lco2)
+        dbg_pair_status(id) = pair_selected
 !        Processing_Mask = 5
       end if
-      if (id == 3 .and. ctp_pres(id) < 650.0 .and. ctp_pres(id) < ctp_pres(1)) then
-        ! Band pair 35/33
-        ipco2 = id
-        lco2  = nint(lev(id)-1)
-        pfco2 = ctp_pres(id)
-        found_solution = .true.
-        Cloud_Top_Pressure = pp(lco2)
-        Cloud_Top_Height = hprof(lco2)
+      if (id == 3 .and. ctp_pres(id) < 650.0 .and. ctp_pres(id) < misr_ctp ) then
+        if  ( ctp_pres(1)  == badvalue .or. ctp_pres(id) < ctp_pres(1)  ) then
+          ! Band pair 35/33
+          ipco2 = id
+          lco2  = nint(lev(id)-1)
+          pfco2 = ctp_pres(id)
+          found_solution = .true.
+          Cloud_Top_Pressure = pp(lco2)
+          Cloud_Top_Height = hprof(lco2)
+          dbg_pair_status(id) = pair_selected
 !        Processing_Mask = 5
+        end if
       end if
     end if
   end do
+  dbg_lco2 = lco2
+  dbg_ipco2 = ipco2
+  dbg_pfco2 = pfco2
+
+  if (.not. found_solution) then
+     pair1_cross = (dbg_pair_status(1) == pair_crossing_found)
+     pair2_cross = (dbg_pair_status(2) == pair_crossing_found)
+     pair3_cross = (dbg_pair_status(3) == pair_crossing_found)
+     pair4_cross = (dbg_pair_status(4) == pair_crossing_found)
+
+     if ((pair1_cross .and. ctp_pres(1) >= misr_ctp) .or. &
+         (pair3_cross .and. ctp_pres(3) >= misr_ctp)) then
+        Failure_Reason = mm_candidate_not_above_misr
+     else if ((pair1_cross .and. ctp_pres(1) >= 450.0) .or. &
+              (pair3_cross .and. ctp_pres(3) >= 650.0)) then
+        Failure_Reason = mm_candidate_outside_band_range
+     else if ((pair2_cross .or. pair4_cross) .and. &
+              (.not. pair1_cross) .and. (.not. pair3_cross)) then
+        Failure_Reason = mm_no_selectable_band_pair
+     else if (any(dbg_pair_status == pair_no_crossing)) then
+        Failure_Reason = mm_no_ratio_crossing
+     else if (all(dbg_pair_status == pair_skipped_signal)) then
+        Failure_Reason = mm_signal_below_noise
+     else if (any(dbg_pair_status == pair_no_valid_ratio)) then
+        Failure_Reason = mm_no_valid_ratio
+     else
+        Failure_Reason = mm_no_valid_ratio
+     end if
+     dbg_failure_reason = Failure_Reason
+  end if
 
 ! Update the Processing Flag for CTP retrieval
   if (found_solution) then
+     Failure_Reason = mm_ok
+     dbg_failure_reason = Failure_Reason
      if (ipco2 == 1) then          ! Band pair 36/35
         if (is_one_layer_call) then
            digit1 = 1              ! 1st digit (1-layer CTP)
@@ -495,7 +735,7 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
 !  EFFECTIVE CLOUD EMISSIVITY  (11 µm window)  –  UNIT‑CONSISTENT VERSION
 !==============================================================================
 
-  if (found_solution .and. imisr - lco2 > 1 ) then
+  if (found_solution) then
     Cloud_Top_Pressure  = pfco2 
     kwc = 5                     ! 11‑µm window band (band‑31)
     ll  = lco2                  ! level index of selected upper cloud
@@ -511,18 +751,28 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
     ! -- 4. Numerator & denominator of Eq. 14 ----------------------------------
     num = delr(5)          ! should be ≤ 0
     den = rwcld - rclr(5)          ! should be ≤ 
+    dbg_num = num
+    dbg_den = den
+    dbg_rwcld = rwcld
     !write(*,*) id, pp(lev(1)), pp(lev(3)), pp(lco2)
     ! -- 6. Emissivity solution -------------------------------------------------
     if (abs(den) > 0.1) then
        ratio = num / den                       ! εA  (0…1)
+       dbg_ratio = ratio
        if (ratio >= 0.01 .and. ratio <= 1.0) then
           Cloud_Effective_Emissivity = ratio * 1
           CO2_Slicing_Flag          = 1
        else
-          return
+          Cloud_Effective_Emissivity = badvalue
+          Cloud_Optical_Depth = badvalue
+          Failure_Reason = mm_ctp_ok_emis_ratio_bad
+          dbg_failure_reason = Failure_Reason
        end if
     else
-       return
+       Cloud_Effective_Emissivity = badvalue
+       Cloud_Optical_Depth = badvalue
+       Failure_Reason = mm_ctp_ok_emis_den_bad
+       dbg_failure_reason = Failure_Reason
     end if
     
 ! Update the Processing Flag for cloud emissivity retrieval    
@@ -550,10 +800,101 @@ subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, 
 end if
 
 ! Finalize Processing Mask (read logic at the top)
-  Processing_Mask = 100*digit1 + 10*digit2 + digit3
+ Processing_Mask = 100*digit1 + 10*digit2 + digit3
+ dbg_processing_mask = Processing_Mask
+ dbg_robs = robs
+ dbg_rclr = rclr
+ dbg_delr = delr
 
 
+end subroutine co2cld_onepixel_misr_reason
+
+subroutine co2cld_onepixel_misr(wprof, tprof, hprof, psfc, pmsl, surftmp, view, &
+                                trad, met_date, rlat, rlon, landsea, misr_ctp, &
+                                Cloud_Top_Pressure, &
+                                Cloud_Top_Height, &
+                                Cloud_Effective_Emissivity, &
+                                Cloud_Optical_Depth, &
+                                Processing_Mask)
+  use co2, only: nbct, plev
+  implicit none
+  real, intent(in) :: wprof(plev), tprof(plev), hprof(plev)
+  real, intent(in) :: psfc, pmsl, surftmp, view, trad(nbct)
+  integer, intent(in) :: met_date(4), landsea
+  real, intent(in) :: rlat, rlon, misr_ctp
+  real, intent(out) :: Cloud_Top_Pressure, Cloud_Top_Height
+  real, intent(out) :: Cloud_Effective_Emissivity, Cloud_Optical_Depth
+  integer, intent(out) :: Processing_Mask
+  integer :: Failure_Reason
+
+  call co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp, view, &
+                                   trad, met_date, rlat, rlon, landsea, misr_ctp, &
+                                   Cloud_Top_Pressure, Cloud_Top_Height, &
+                                   Cloud_Effective_Emissivity, Cloud_Optical_Depth, &
+                                   Processing_Mask, Failure_Reason)
 end subroutine co2cld_onepixel_misr
+
+subroutine co2cld_onepixel_misr_debug(wprof, tprof, hprof, psfc, pmsl, surftmp, view, &
+                                      trad, met_date, rlat, rlon, landsea, misr_ctp, &
+                                      Cloud_Top_Pressure, Cloud_Top_Height, &
+                                      Cloud_Effective_Emissivity, Cloud_Optical_Depth, &
+                                      Processing_Mask, Failure_Reason, &
+                                      diag_isp, diag_imisr, diag_ltrp, diag_lco2, diag_ipco2, &
+                                      diag_pair_status, diag_krto, diag_lev, diag_ctp_pres, &
+                                      diag_tmisr, diag_num, diag_den, diag_ratio, diag_rwcld, &
+                                      diag_tcold, diag_robs, diag_rclr, diag_delr, &
+                                      diag_tpad, diag_wpad, diag_ozpad, diag_taup, diag_ra)
+  use co2, only: nbct, plev, nsct, dbg_isp, dbg_imisr, dbg_ltrp, dbg_lco2, &
+                 dbg_ipco2, dbg_pair_status, dbg_krto, dbg_lev, dbg_ctp_pres, &
+                 dbg_tmisr, dbg_num, dbg_den, dbg_ratio, dbg_rwcld, dbg_tcold, &
+                 dbg_robs, dbg_rclr, dbg_delr, dbg_tpad, dbg_wpad, dbg_ozpad, &
+                 dbg_taup, dbg_ra
+  implicit none
+  real, intent(in) :: wprof(plev), tprof(plev), hprof(plev)
+  real, intent(in) :: psfc, pmsl, surftmp, view, trad(nbct)
+  integer, intent(in) :: met_date(4), landsea
+  real, intent(in) :: rlat, rlon, misr_ctp
+  real, intent(out) :: Cloud_Top_Pressure, Cloud_Top_Height
+  real, intent(out) :: Cloud_Effective_Emissivity, Cloud_Optical_Depth
+  integer, intent(out) :: Processing_Mask, Failure_Reason
+  integer, intent(out) :: diag_isp, diag_imisr, diag_ltrp, diag_lco2, diag_ipco2
+  integer, intent(out) :: diag_pair_status(nsct), diag_krto(nsct)
+  real, intent(out) :: diag_lev(nsct), diag_ctp_pres(nsct)
+  real, intent(out) :: diag_tmisr, diag_num, diag_den, diag_ratio, diag_rwcld
+  real, intent(out) :: diag_tcold(nbct), diag_robs(nbct), diag_rclr(nbct), diag_delr(nbct)
+  real, intent(out) :: diag_tpad(plev), diag_wpad(plev), diag_ozpad(plev)
+  real, intent(out) :: diag_taup(plev,nbct), diag_ra(plev,nbct)
+
+  call co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp, view, &
+                                   trad, met_date, rlat, rlon, landsea, misr_ctp, &
+                                   Cloud_Top_Pressure, Cloud_Top_Height, &
+                                   Cloud_Effective_Emissivity, Cloud_Optical_Depth, &
+                                   Processing_Mask, Failure_Reason)
+
+  diag_isp = dbg_isp
+  diag_imisr = dbg_imisr
+  diag_ltrp = dbg_ltrp
+  diag_lco2 = dbg_lco2
+  diag_ipco2 = dbg_ipco2
+  diag_pair_status = dbg_pair_status
+  diag_krto = dbg_krto
+  diag_lev = dbg_lev
+  diag_ctp_pres = dbg_ctp_pres
+  diag_tmisr = dbg_tmisr
+  diag_num = dbg_num
+  diag_den = dbg_den
+  diag_ratio = dbg_ratio
+  diag_rwcld = dbg_rwcld
+  diag_tcold = dbg_tcold
+  diag_robs = dbg_robs
+  diag_rclr = dbg_rclr
+  diag_delr = dbg_delr
+  diag_tpad = dbg_tpad
+  diag_wpad = dbg_wpad
+  diag_ozpad = dbg_ozpad
+  diag_taup = dbg_taup
+  diag_ra = dbg_ra
+end subroutine co2cld_onepixel_misr_debug
 
 subroutine get_clearsky_bias(wprof, tprof, psfc, surftmp, view, rlat, landsea,  &
                              met_date, clr_obs, npix,                            &
@@ -698,6 +1039,137 @@ subroutine get_clearsky_bias(wprof, tprof, psfc, surftmp, view, rlat, landsea,  
 
 end subroutine get_clearsky_bias
 
+subroutine compute_multilayer_score(mod_cth_final, misr_cth_final, &
+                                    badvalue_in, z_single, ml_flag)
+  use, intrinsic :: ieee_arithmetic
+  implicit none
+
+  real,    intent(in)  :: mod_cth_final
+  real,    intent(in)  :: misr_cth_final
+  real,    intent(in)  :: badvalue_in
+  real,    intent(out) :: z_single
+  integer, intent(out) :: ml_flag
+
+  real :: d_cth
+  real :: mu_single, sigma_single
+  real, parameter :: max_valid_cth = 20000.0
+
+  z_single = badvalue_in
+  ml_flag  = 0
+
+  ! Only evaluate pixels where both MODIS and MISR CTH are valid.
+  if (.not. ieee_is_finite(misr_cth_final)) return
+  if (.not. ieee_is_finite(mod_cth_final)) return
+  if (misr_cth_final <= -500.0 .or. misr_cth_final > max_valid_cth) return
+  if (mod_cth_final <= 0.0 .or. mod_cth_final > max_valid_cth) return
+
+  ! 3.5*MAD-filtered calibration constants, units = meters.
+  ! D = MODIS_CTH - MISR_CTH.
+  if (misr_cth_final > 4000.0) then
+    mu_single    = -349.0
+    sigma_single = 1971.1
+  else
+    mu_single    = -241.0
+    sigma_single = 676.1
+  end if
+
+  if (sigma_single <= 0.0) return
+
+  d_cth = mod_cth_final - misr_cth_final
+  z_single = (d_cth - mu_single) / sigma_single
+
+  ! One-sided multilayer evidence flag:
+  ! 0 = not evaluated
+  ! 1 = weak_or_no_evidence, confidence < 90%, Z < 1.2816
+  ! 2 = moderate_evidence,  90% <= confidence < 95%, 1.2816 <= Z < 1.6449
+  ! 3 = strong_evidence,    95% <= confidence < 99%, 1.6449 <= Z < 2.3263
+  ! 4 = very_strong_evidence, confidence >= 99%, Z >= 2.3263
+
+  if (z_single < 1.2816) then
+    ml_flag = 1
+  else if (z_single < 1.6449) then
+    ml_flag = 2
+  else if (z_single < 2.3263) then
+    ml_flag = 3
+  else
+    ml_flag = 4
+  end if
+
+end subroutine compute_multilayer_score
+
+subroutine compute_multilayer_score_mode(mod_cth_final, misr_cth_final, processing_mask, &
+                                    badvalue_in, z_single, ml_flag)
+  use, intrinsic :: ieee_arithmetic
+  implicit none
+
+  real,    intent(in)  :: mod_cth_final
+  real,    intent(in)  :: misr_cth_final
+  integer, intent(in)  :: processing_mask
+  real,    intent(in)  :: badvalue_in
+  real,    intent(out) :: z_single
+  integer, intent(out) :: ml_flag
+
+  real :: d_cth
+  real :: mu_single, sigma_single
+  real :: mod_bias, misr_bias
+  real :: mod_precision, misr_precision
+  real, parameter :: max_valid_cth = 20000.0
+
+  z_single = badvalue_in
+  ml_flag  = 0
+
+  ! Only evaluate pixels where both MISR and final MM CTH are valid.
+  if (.not. ieee_is_finite(misr_cth_final)) return
+  if (.not. ieee_is_finite(mod_cth_final)) return
+  if (misr_cth_final <= -500.0 .or. misr_cth_final > max_valid_cth) return
+  if (mod_cth_final < 0.0 .or. mod_cth_final > max_valid_cth) return
+  ! Skip no-retrieval, MODIS-only, and MISR-only cases.
+  if (processing_mask == 0 .or. processing_mask == 1 .or. processing_mask == 2) return
+  ! -----------------------------------------------------------
+  ! Temporary calibration constants, units = meters.
+  ! Replace later with final CATS single-layer calibration table.
+  !
+  ! -----------------------------------------------------------
+  if (misr_cth_final > 4000.0) then
+    ! high cloud
+    mod_bias        = -1125.0
+    mod_precision   = 106
+    misr_bias      = -325
+    misr_precision = 403
+  else
+    ! low cloud
+    mod_bias        = -675
+    mod_precision   = 510
+    misr_bias      = -325
+    misr_precision = 276
+  end if
+
+  mu_single = mod_bias - misr_bias
+  sigma_single = sqrt(mod_precision * mod_precision + misr_precision * misr_precision)
+
+
+  d_cth = mod_cth_final - misr_cth_final
+  z_single = (d_cth - mu_single) / sigma_single
+
+  if (sigma_single <= 0.0) return
+  ! One-sided multilayer evidence flag:
+  ! 0 = not evaluated
+  ! 1 = weak_or_no_evidence, confidence < 90%, Z < 1.2816
+  ! 2 = moderate_evidence,  90% <= confidence < 95%, 1.2816 <= Z < 1.6449
+  ! 3 = strong_evidence,    95% <= confidence < 99%, 1.6449 <= Z < 2.3263
+  ! 4 = very_strong_evidence, confidence >= 99%, Z >= 2.3263
+
+  if (z_single < 1.2816) then
+    ml_flag = 1
+  else if (z_single < 1.6449) then
+    ml_flag = 2
+  else if (z_single < 2.3263) then
+    ml_flag = 3
+  else
+    ml_flag = 4
+  end if
+end subroutine compute_multilayer_score_mode
+
 subroutine process_selected_pixels(wprof, tprof, hprof, psfc, pmsl, surftmp, &
                                   view, trad, rlat, rlon, landsea, misr_ctp, &
                                   misr_cth,mod_cth,mod_ctp,mod_method, mod_opt,mod_emi, &
@@ -707,10 +1179,17 @@ subroutine process_selected_pixels(wprof, tprof, hprof, psfc, pmsl, surftmp, &
                                   Cloud_Effective_Emissivity, &
                                   Cloud_Optical_Depth, &
                                   Processing_Mask, &
+                                  Multilayer_ZScore, &
+                                  Multilayer_flag, &
+                                  MM_FailureReason, &
+                                  Scene_ClearSkyBias, &
                                   ! ------------ NEW OPTIONAL ARGS -------------
                                   clr_obs, cs_idx)
   use co2, only: nbct, plev, pp, nb_wavelen, ntbct, mbnds, jdet, freq, &
-                 kch, nsct, rmin, emadj, badvalue, emisrw
+                 kch, nsct, rmin, emadj, badvalue, emisrw, &
+                 mm_ok, mm_not_attempted, mm_invalid_misr_ctp, &
+                 mm_candidate_not_higher_than_1layer, mm_reference_1layer_failed, &
+                 mm_candidate_no_ctp_digit, mm_ctp_ok_emis_den_bad
   use, intrinsic :: ieee_arithmetic
   implicit none
   ! ---------- Required inputs (unchanged) ----------
@@ -742,6 +1221,10 @@ subroutine process_selected_pixels(wprof, tprof, hprof, psfc, pmsl, surftmp, &
   real,    intent(out) :: Cloud_Effective_Emissivity(npix)
   real,    intent(out) :: Cloud_Optical_Depth(npix)
   integer, intent(out) :: Processing_Mask(npix)
+  real,    intent(out) :: Multilayer_ZScore(npix)
+  integer, intent(out) :: Multilayer_flag(npix)
+  integer, intent(out) :: MM_FailureReason(npix)
+  real,    intent(out) :: Scene_ClearSkyBias(nbct)
 
   ! ---------- NEW optional inputs ----------
   real,    intent(in), optional :: clr_obs(nbct, npix)
@@ -752,26 +1235,32 @@ subroutine process_selected_pixels(wprof, tprof, hprof, psfc, pmsl, surftmp, &
   real :: psfc_pix, pmsl_pix, surftmp_pix, view_pix
   real :: trad_pix(nbct), trad_adj(nbct)
   integer :: met_date_pix(4), landsea_pix
-  real :: rlat_pix, rlon_pix, misr_ctp_pix, misr_cth_pix, mod_cth_pix
-  integer ::  mod_method_pix 
+  real :: rlat_pix, rlon_pix, misr_ctp_pix, misr_cth_pix, mod_cth_pix,mod_ctp_pix
+  integer ::  mod_method_pix
   real :: Cloud_Top_Pressure_pix, Cloud_Top_Height_pix, Cloud_Optical_Depth_pix
   real :: Cloud_Effective_Emissivity_pix
-  integer :: Processing_Mask_pix, flag_digit
+  integer :: Processing_Mask_pix, Failure_Reason_pix
+  integer :: multilayer_thresold  ! currently equals to 3; only 95% confidence is considered two-layer 
 
   integer :: pix, i, k
   real    :: bias_w_um(nbct)
   integer :: n_used(nbct)
-  logical :: use_bias 
+  logical :: use_bias
+  logical :: mm_failed
+  logical :: misr_cth_valid, mod_cth_valid
+  logical :: misr_ctp_was_invalid, ref_has_ctp, cand_has_ctp_digit
+  integer :: digit1, digit2, ref_digit1, ref_digit2
+  integer :: mm_reason
+  real, parameter :: max_valid_cth = 20000.0
 
   ! For bias computation subsets
   integer :: ncs
   real, allocatable    :: w_cs(:,:), t_cs(:,:), psfc_cs(:), surftmp_cs(:), view_cs(:), rlat_cs(:)
   integer, allocatable :: landsea_cs(:), cs_list(:)
   real, allocatable    :: clr_obs_cs(:,:)
-
   ! --------- keep the old file outputs (unchanged) ----------
-  open(unit=98, file='output_1layer.txt', status='unknown', action='write')
-  open(unit=99, file='output_2layer.txt',  status='unknown', action='write')
+  ! open(unit=98, file='output_1layer.txt', status='unknown', action='write')
+  ! open(unit=99, file='output_2layer.txt',  status='unknown', action='write')
 
   ! --------- Initialize outputs (unchanged) ----------
   Cloud_Top_Pressure         = badvalue
@@ -779,6 +1268,12 @@ subroutine process_selected_pixels(wprof, tprof, hprof, psfc, pmsl, surftmp, &
   Cloud_Effective_Emissivity = badvalue
   Cloud_Optical_Depth        = badvalue
   Processing_Mask            = 1
+  Multilayer_flag   = 0
+  Multilayer_ZScore = badvalue
+  MM_FailureReason = mm_ok
+  Scene_ClearSkyBias = 0.0
+  
+  multilayer_thresold = 3
 
   ! ===========================================================
   ! 1) Compute scene clear-sky bias if data are provided
@@ -813,6 +1308,7 @@ subroutine process_selected_pixels(wprof, tprof, hprof, psfc, pmsl, surftmp, &
       deallocate( w_cs, t_cs, psfc_cs, surftmp_cs, view_cs, rlat_cs, landsea_cs, cs_list, clr_obs_cs )
     end if
   end if
+  Scene_ClearSkyBias = bias_w_um
 
   ! ===========================================================
   ! 2) Choose pixel list to process:
@@ -835,52 +1331,89 @@ subroutine process_selected_pixels(wprof, tprof, hprof, psfc, pmsl, surftmp, &
       misr_ctp_pix= misr_ctp(pix)
       misr_cth_pix= misr_cth(pix)
       mod_cth_pix= mod_cth(pix)
+      mod_ctp_pix= mod_ctp(pix)
       mod_method_pix= mod_method(pix)
       met_date_pix= met_date
 
-      if (misr_cth_pix < -500.0 .and. mod_cth_pix < 0.0) then
+      misr_cth_valid = ieee_is_finite(misr_cth_pix) .and. &
+                       misr_cth_pix > -500.0 .and. misr_cth_pix <= max_valid_cth
+      mod_cth_valid = ieee_is_finite(mod_cth_pix) .and. &
+                      mod_cth_pix >= 0.0 .and. mod_cth_pix <= max_valid_cth
+
+      if (.not. misr_cth_valid .and. .not. mod_cth_valid) then
         Cloud_Top_Pressure(pix)         = -9999.0
         Cloud_Top_Height(pix)           = -9999.0
         Cloud_Effective_Emissivity(pix) = -9999.0
         Cloud_Optical_Depth(pix)        = -9999.0
         Processing_Mask(pix)            = 0
+        Multilayer_flag(pix)          =  0
+        MM_FailureReason(pix)           = mm_not_attempted
         cycle
       end if
-
-      if (misr_cth_pix < -500.0) then
+      Multilayer_flag(pix)          =  0
+      if (.not. misr_cth_valid) then
         Cloud_Top_Pressure(pix)         = mod_ctp(pix)
         Cloud_Top_Height(pix)           = mod_cth(pix)
         Cloud_Effective_Emissivity(pix) = mod_emi(pix)
         Cloud_Optical_Depth(pix)        = mod_opt(pix)
         Processing_Mask(pix)            = 1
+        MM_FailureReason(pix)           = mm_not_attempted
         cycle
       end if
-
-      if (mod_cth_pix < 0.0) then
+      if (.not. mod_cth_valid) then
         Cloud_Top_Pressure(pix)         = misr_ctp_pix
         Cloud_Top_Height(pix)           = misr_cth_pix
         Cloud_Effective_Emissivity(pix) = mod_emi(pix)
         Cloud_Optical_Depth(pix)        = mod_opt(pix)
         Processing_Mask(pix)            = 2
+        MM_FailureReason(pix)           = mm_not_attempted
         cycle
       end if
 
-      if ((mod_cth_pix - misr_cth_pix) <= 1000.0 .or. mod_method_pix >= 5 .or. misr_ctp_pix <= 700.0) then
-        Cloud_Top_Pressure(pix)         = min(misr_ctp_pix, mod_ctp(pix))
-        Cloud_Top_Height(pix)           = max(misr_cth_pix, mod_cth(pix))
-        Cloud_Effective_Emissivity(pix) = mod_emi(pix)
-        Cloud_Optical_Depth(pix)        = mod_opt(pix)
-        if (misr_cth_pix < mod_cth_pix) then
-          Processing_Mask(pix) = 3
-        else
-          Processing_Mask(pix) = 4
-        end if
-        cycle
+!# Turn off misr cloud top height <=700 on Mar 17, 2026
+!#      if ((mod_cth_pix - misr_cth_pix) <= 1000.0 .or. mod_method_pix >= 5 .or. misr_ctp_pix <= 700.0) then
+!# Turn off everything for testing on Mar 26, 2026, Should turn back on with fixes
+
+      call compute_multilayer_score(mod_cth_pix, misr_cth_pix, &
+                              badvalue, Multilayer_ZScore(pix), Multilayer_flag(pix))
+
+      if (mod_cth_pix < misr_cth_pix) then
+          Cloud_Top_Pressure(pix)         = misr_ctp_pix
+          Cloud_Top_Height(pix)           = misr_cth_pix
+          Cloud_Effective_Emissivity(pix) = mod_emi(pix)
+          Cloud_Optical_Depth(pix)        = mod_opt(pix)
+          Processing_Mask(pix)            = 3
+          MM_FailureReason(pix)           = mm_not_attempted
+          cycle
       end if
+      if (mod_method_pix >= 5) then
+         if (Multilayer_flag(pix) >= multilayer_thresold .and. Multilayer_flag(pix) <= 4) then
+          Cloud_Top_Pressure(pix)         = mod_ctp_pix
+          Cloud_Top_Height(pix)           = mod_cth_pix
+          Cloud_Effective_Emissivity(pix) = mod_emi(pix)
+          Cloud_Optical_Depth(pix)        = mod_opt(pix)
+          Processing_Mask(pix)            = 5
+          MM_FailureReason(pix)           = mm_not_attempted
+          cycle
+         else
+          Cloud_Top_Pressure(pix)         = misr_ctp_pix
+          Cloud_Top_Height(pix)           = misr_cth_pix
+          Cloud_Effective_Emissivity(pix) = mod_emi(pix)
+          Cloud_Optical_Depth(pix)        = mod_opt(pix)
+          Processing_Mask(pix)            = 4
+          MM_FailureReason(pix)           = mm_not_attempted
+          cycle
+        end if
+      end if
+
       ! --------- NEW: robust MISR-CTP fallback (no cycle/skip) ----------
+      misr_ctp_was_invalid = .false.
       if (.not. ieee_is_finite(misr_ctp_pix) .or. misr_ctp_pix <= 0.0 .or. &
           misr_ctp_pix < pp(1) .or. misr_ctp_pix > psfc_pix) then
-         misr_ctp_pix = psfc_pix
+         if (ieee_is_finite(psfc_pix) .and. psfc_pix > pp(1) .and. psfc_pix <= 1100.0) then
+            misr_ctp_was_invalid = .true.
+            misr_ctp_pix = psfc_pix
+         end if
       end if
 
       ! --- apply bias (if available) to all nbct channels -------------
@@ -891,60 +1424,105 @@ subroutine process_selected_pixels(wprof, tprof, hprof, psfc, pmsl, surftmp, &
         end do
       end if
 
-      call co2cld_onepixel_misr(wprof_pix, tprof_pix, hprof_pix, psfc_pix, pmsl_pix, &
+      call co2cld_onepixel_misr_reason(wprof_pix, tprof_pix, hprof_pix, psfc_pix, pmsl_pix, &
                                 surftmp_pix, view_pix, trad_adj, met_date_pix, &
                                 rlat_pix, rlon_pix, landsea_pix, psfc_pix, &
                                 Cloud_Top_Pressure_pix, Cloud_Top_Height_pix, &
                                 Cloud_Effective_Emissivity_pix, Cloud_Optical_Depth_pix, &
-                                Processing_Mask_pix)
+                                Processing_Mask_pix, Failure_Reason_pix)
 
       Cloud_Top_Pressure(pix)         = Cloud_Top_Pressure_pix
       Cloud_Top_Height(pix)           = Cloud_Top_Height_pix
       Cloud_Effective_Emissivity(pix) = Cloud_Effective_Emissivity_pix
       Cloud_Optical_Depth(pix)        = Cloud_Optical_Depth_pix
       Processing_Mask(pix)            = Processing_Mask_pix
-      write(98, '(I8, 6F16.6, I8)') pix, psfc_pix, misr_ctp_pix, Cloud_Top_Pressure(pix), &
-                               Cloud_Top_Height(pix), Cloud_Effective_Emissivity(pix), &
-                               Cloud_Optical_Depth(pix), Processing_Mask(pix)
+      ref_digit1 = Processing_Mask_pix / 100
+      ref_digit2 = mod(Processing_Mask_pix, 100) / 10
+      ref_has_ctp = (ref_digit1 == 1 .or. ref_digit1 == 2 .or. &
+                     ref_digit2 == 1 .or. ref_digit2 == 2)
+      ! write(98, '(I8, 6F16.6, I8)') pix, psfc_pix, misr_ctp_pix, Cloud_Top_Pressure(pix), &
+      !                          Cloud_Top_Height(pix), Cloud_Effective_Emissivity(pix), &
+      !                          Cloud_Optical_Depth(pix), Processing_Mask(pix)
 
-      call co2cld_onepixel_misr(wprof_pix, tprof_pix, hprof_pix, psfc_pix, pmsl_pix, &
+      call co2cld_onepixel_misr_reason(wprof_pix, tprof_pix, hprof_pix, psfc_pix, pmsl_pix, &
                                 surftmp_pix, view_pix, trad_adj, met_date_pix, &
                                 rlat_pix, rlon_pix, landsea_pix, misr_ctp_pix, &
                                 Cloud_Top_Pressure_pix, Cloud_Top_Height_pix, &
                                 Cloud_Effective_Emissivity_pix, Cloud_Optical_Depth_pix, &
-                                Processing_Mask_pix)
+                                Processing_Mask_pix, Failure_Reason_pix)
 
-      if (Cloud_Top_Pressure_pix <= Cloud_Top_Pressure(pix)) then
+      mm_failed = .false.
+      mm_reason = mm_ok
+      digit1 = Processing_Mask_pix / 100
+      digit2 = mod(Processing_Mask_pix, 100) / 10
+      cand_has_ctp_digit = (digit1 == 1 .or. digit1 == 2 .or. &
+                            digit2 == 1 .or. digit2 == 2)
+
+      if (misr_ctp_was_invalid) then
+        mm_failed = .true.
+        mm_reason = mm_invalid_misr_ctp
+      else if (.not. ref_has_ctp) then
+        mm_failed = .true.
+        if (Failure_Reason_pix /= mm_ok .and. Failure_Reason_pix < mm_ctp_ok_emis_den_bad) then
+          mm_reason = Failure_Reason_pix
+        else
+          mm_reason = mm_reference_1layer_failed
+        end if
+      else if (Cloud_Top_Pressure_pix <= Cloud_Top_Pressure(pix)) then
         Cloud_Top_Pressure(pix)         = Cloud_Top_Pressure_pix
-        Cloud_Top_Height(pix)           = Cloud_Top_Height_pix*1000.0
+        Cloud_Top_Height(pix)           = Cloud_Top_Height_pix * 1000.0
         Cloud_Effective_Emissivity(pix) = Cloud_Effective_Emissivity_pix
         Cloud_Optical_Depth(pix)        = Cloud_Optical_Depth_pix
-        flag_digit = modulo(processing_Mask_pix / 10, 10)
-        if (flag_digit == 1) then
-          Processing_Mask(pix) = 6
-        else if (flag_digit == 2) then
-          Processing_Mask(pix) = 7
+        if (digit1 == 1 .or. digit2 == 1) then
+          Processing_Mask(pix) = 8
+        else if (digit1 == 2 .or. digit2 == 2) then
+          Processing_Mask(pix) = 9
         else
-          Cloud_Top_Pressure(pix)         = mod_ctp(pix)
-          Cloud_Top_Height(pix)           = mod_cth(pix)
-          Cloud_Effective_Emissivity(pix) = mod_emi(pix)
-          Cloud_Optical_Depth(pix)        = mod_opt(pix)
-          Processing_Mask(pix)            = 5
+          mm_failed = .true.
+          if (Failure_Reason_pix /= mm_ok .and. Failure_Reason_pix < mm_ctp_ok_emis_den_bad) then
+            mm_reason = Failure_Reason_pix
+          else
+            mm_reason = mm_candidate_no_ctp_digit
+          end if
+        end if
+        if (.not. mm_failed .and. Failure_Reason_pix >= mm_ctp_ok_emis_den_bad) then
+          MM_FailureReason(pix) = Failure_Reason_pix
         end if
       else
-        Cloud_Top_Pressure(pix)         = mod_ctp(pix)
-        Cloud_Top_Height(pix)           = mod_cth(pix)
-        Cloud_Effective_Emissivity(pix) = mod_emi(pix)
-        Cloud_Optical_Depth(pix)        = mod_opt(pix)
-        Processing_Mask(pix)            = 5
+        mm_failed = .true.
+        if (Failure_Reason_pix /= mm_ok .and. Failure_Reason_pix < mm_ctp_ok_emis_den_bad) then
+          mm_reason = Failure_Reason_pix
+        else
+          mm_reason = mm_candidate_not_higher_than_1layer
+        end if
       end if
 
-      write(99, '(I8, 6F16.6, I8)') pix, psfc_pix, misr_ctp_pix, Cloud_Top_Pressure(pix), &
-                               Cloud_Top_Height(pix), Cloud_Effective_Emissivity(pix), &
-                               Cloud_Optical_Depth(pix), Processing_Mask(pix)
+
+      ! If the MM retrieval failed or is not accepted, fall back to MISR or MODIS
+      ! depending on the MODIS-MISR multilayer evidence flag.
+      if (mm_failed) then
+        if (Multilayer_flag(pix) >= multilayer_thresold .and. Multilayer_flag(pix) <= 4) then
+          Cloud_Top_Pressure(pix)         = mod_ctp_pix
+          Cloud_Top_Height(pix)           = mod_cth_pix
+          Cloud_Effective_Emissivity(pix) = mod_emi(pix)
+          Cloud_Optical_Depth(pix)        = mod_opt(pix)
+          Processing_Mask(pix)            = 7
+          MM_FailureReason(pix)           = mm_reason
+        else
+          Cloud_Top_Pressure(pix)         = misr_ctp_pix
+          Cloud_Top_Height(pix)           = misr_cth_pix
+          Cloud_Effective_Emissivity(pix) = mod_emi(pix)
+          Cloud_Optical_Depth(pix)        = mod_opt(pix)
+          Processing_Mask(pix)            = 6
+          MM_FailureReason(pix)           = mm_reason
+        end if
+      end if
+      ! write(99, '(I8, 6F16.6, I8)') pix, psfc_pix, misr_ctp_pix, Cloud_Top_Pressure(pix), &
+      !                          Cloud_Top_Height(pix), Cloud_Effective_Emissivity(pix), &
+      !                          Cloud_Optical_Depth(pix), Processing_Mask(pix)
   end do
-  close(98)
-  close(99)
+  ! close(98)
+  ! close(99)
 end subroutine process_selected_pixels
 
 subroutine height_to_log_pressure(geo_height, misr_cth, rows, cols, pressure_at_cth)
@@ -1028,4 +1606,4 @@ integer function date2doy(iyear, imonth, iday)
   do m = 1, imonth-1
      date2doy = date2doy + dmon(m)
   end do
-  end function date2doy 
+  end function date2doy

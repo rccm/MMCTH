@@ -15,14 +15,17 @@ from .xarray_saver import XarraySaver
 from src.pixel import modis
 from pyproj import Transformer
 
-
-
 from .misr_cth_to_pressure import height_to_log_pressure
 from .interpolate_to_pressure_levels import interpolate_to_pressure_levels
 
 class MODISMISRProcessor:
     '''  Process MODIS data  and MISR TC_Cloud data if avaible    '''
-    def __init__(self, input_files, logger: Optional[logging.Logger] = None):
+    def __init__(
+        self,
+        input_files,
+        logger: Optional[logging.Logger] = None,
+        destripe_flag: bool = True,
+    ):
         if len(input_files) != 9:
             logger.error("Error! The input file list is WRONG")
             sys.exit()    
@@ -32,6 +35,7 @@ class MODISMISRProcessor:
         self.tccloud_file = input_files[3]
         self.agp_file = input_files[4]
         self.log  = logger or logging.getLogger(self.__class__.__name__)
+        self.destripe_flag = destripe_flag
         self.mod_read = importlib.import_module('src.data_readers.mod_read')
         self.misr_read = importlib.import_module('src.data_readers.misr_read')
         self.id = re.search(r'A\d{7}\.\d{4}', self.mod21_file).group() if re.search(r'A\d{7}\.\d{4}', self.mod21_file) else None
@@ -40,7 +44,10 @@ class MODISMISRProcessor:
     def process_mod21(self, save_format='normal'):
         try:
             self.log.debug("Processing MOD21 data")
-            mod21 = self.mod_read.MODL1Granule(self.mod21_file)
+            mod21 = self.mod_read.MODL1Granule(
+                self.mod21_file,
+                destripe_flag=self.destripe_flag,
+            )
             bands_BT = {f'bt_{band}': mod21.get_BT(str(band)) for band in [36, 35, 34, 33, 31]}
             if (save_format == 'org'):
                 print('write reflecance as well...')
@@ -66,6 +73,18 @@ class MODISMISRProcessor:
         try:
             self.log.debug("Processing MOD06 data")
             mod06 = self.mod_read.MOD06Granule(self.mod06_file)
+            qa = mod06.get_qa()   # shape (ny, nx, 9), int8 or byte
+            qa_u8 = np.asarray(qa, dtype=np.int8).view(np.uint8)
+            byte4 = qa_u8[:, :, 4]
+            multilayer_flag = ((byte4 >> 3) & 0b111).astype(np.int8)
+            # byte5 = qa_u8[:, :, 5]
+            multilayer_flag = ((byte4 >> 3) & 0b111).astype(np.int8)
+            # ml_test_phase_diff = ((byte5 >> 0) & 0b1).astype(np.int8)
+            # ml_test_delta_pwv = ((byte5 >> 1) & 0b1).astype(np.int8)
+            # ml_test_delta_pwv_900 = ((byte5 >> 2) & 0b1).astype(np.int8)
+            # ml_test_tau_diff = ((byte5 >> 3) & 0b1).astype(np.int8)
+            # ml_test_pavolonis = ((byte5 >> 4) & 0b1).astype(np.int8)
+
             result = {
                 'ctp': mod06.get_ctp(),
                 'opt': mod06.get_opt(),
@@ -73,6 +92,8 @@ class MODISMISRProcessor:
                 'cth': mod06.get_cth(),
                 'emissivity': mod06.get_emissivity(),
                 'ctm': mod06.get_ctm(),
+                # 'cmulti': mod06.get_multi(),
+                # 'cqa': multilayer_flag,
             }
             self.log.debug("MOD06 data processed successfully")
             return result
@@ -84,7 +105,14 @@ class MODISMISRProcessor:
         try:
             self.log.debug("Processing MOD03 data")
             mod03 = self.mod_read.MOD03Granule(self.mod03_file)
-            result = mod03.get_lat(), mod03.get_lon(), mod03.get_landsea_mask(), mod03.get_vza()
+            result = (
+                mod03.get_lat(),
+                mod03.get_lon(),
+                mod03.get_landsea_mask(),
+                mod03.get_vza(),
+                mod03.get_time_2d_since_2000(use_center_time=True, fast=True),
+                mod03.get_time_1d_since_2000(use_center_time=True),
+            )
             self.log.debug("MOD03 data processed successfully")
             return result
         except Exception as e:
@@ -104,6 +132,12 @@ class MODISMISRProcessor:
             try:
                 tc_cloud = self.misr_read.MISRGranule(self.tccloud_file)
                 cth,cth_qa = tc_cloud.get_cth()
+                sdcm = tc_cloud.get_sdcm()
+                agp = self.misr_read.MISRGranule(self.agp_file)
+                landwater = agp.get_landmask()
+                land_mask = np.isin(landwater,[1,2,3,4])
+                sdcm_mask = np.isin(sdcm, [3,4])
+                cth[land_mask & sdcm_mask] = -9999.0
                 return  cth,cth_qa
             except Exception as e:
                 self.log.error(f"Error getting MISR CTH: {e}")
@@ -111,19 +145,92 @@ class MODISMISRProcessor:
             
     def misr_to_modis(self, source_lat, source_lon, target_lat, target_lon, proj_data):
         try:
-            source_def = SwathDefinition(lons=source_lon, lats=source_lat)
-            target_def = SwathDefinition(lons=target_lon, lats=target_lat)
+            source_lat = self._as_float_array(source_lat)
+            source_lon = self._as_float_array(source_lon)
+            target_lat = self._as_float_array(target_lat)
+            target_lon = self._as_float_array(target_lon)
+            source_valid = self._valid_latlon_mask(source_lat, source_lon)
+            target_valid = self._valid_latlon_mask(target_lat, target_lon)
+
+            if not np.any(source_valid):
+                self.log.error("No valid source geolocation for MISR to MODIS reprojection")
+                return None
+            if not np.any(target_valid):
+                self.log.error("No valid target MODIS geolocation for MISR to MODIS reprojection")
+                return None
+
+            proj_data = np.asarray(proj_data)
+            if proj_data.shape != source_lat.shape:
+                self.log.error(
+                    "Projection data shape %s does not match source geolocation shape %s",
+                    proj_data.shape,
+                    source_lat.shape,
+                )
+                return None
+
+            target_lat_safe = np.where(target_valid, target_lat, 0.0)
+            target_lon_safe = np.where(target_valid, target_lon, 0.0)
+            source_values = proj_data[source_valid]
+            if np.issubdtype(source_values.dtype, np.integer):
+                dtype_info = np.iinfo(source_values.dtype)
+                if -999 < dtype_info.min or -999 > dtype_info.max:
+                    source_values = source_values.astype(np.int16, copy=False)
+
+            source_def = SwathDefinition(lons=source_lon[source_valid], lats=source_lat[source_valid])
+            target_def = SwathDefinition(lons=target_lon_safe, lats=target_lat_safe)
             reproj_data = kd_tree.resample_nearest(
                 source_def,
-                proj_data,
+                source_values,
                 target_def,
                 radius_of_influence=1100,
                 fill_value=-999
             )
+            if np.ma.isMaskedArray(reproj_data):
+                reproj_data = reproj_data.filled(-999)
+            reproj_data = np.asarray(reproj_data)
+            reproj_data[~target_valid] = -999
             return reproj_data
         except Exception as e:
             self.log.error(f"Error in MISR to MODIS reprojection: {e}")
             return None
+
+    @staticmethod
+    def _as_float_array(arr):
+        if np.ma.isMaskedArray(arr):
+            arr = arr.filled(np.nan)
+        return np.asarray(arr, dtype=np.float64)
+
+    def _valid_latlon_mask(self, lat, lon):
+        lat = self._as_float_array(lat)
+        lon = self._as_float_array(lon)
+        return (
+            np.isfinite(lat) &
+            np.isfinite(lon) &
+            (lat >= -90.0) &
+            (lat <= 90.0) &
+            (lon >= -180.0) &
+            (lon <= 180.0)
+        )
+
+    def _prune_invalid_geo_from_rect(self, valid_rows, valid_cols, geo_valid):
+        rows = np.asarray(valid_rows, dtype=bool).copy()
+        cols = np.asarray(valid_cols, dtype=bool).copy()
+
+        while np.any(rows) and np.any(cols):
+            selected_rows = np.flatnonzero(rows)
+            selected_cols = np.flatnonzero(cols)
+            invalid = ~geo_valid[np.ix_(selected_rows, selected_cols)]
+            if not np.any(invalid):
+                return rows, cols
+
+            bad_rows = np.any(invalid, axis=1)
+            bad_cols = np.any(invalid, axis=0)
+            if np.count_nonzero(bad_rows) <= np.count_nonzero(bad_cols):
+                rows[selected_rows[bad_rows]] = False
+            else:
+                cols[selected_cols[bad_cols]] = False
+
+        return rows, cols
 
     def cutoff_misr_swath(self, misr_swath):
         try:
@@ -180,13 +287,20 @@ class MODISMISRProcessor:
         out = {'bands_BT': None, 'misr_cth': None, 'mod_geo': None, 'mod06': None}
 
         # ---------- 1. Read MOD03 geo ----------
-        mod_lat, mod_lon, mod_landsea, mod_vza = self.process_mod03()
+        mod_lat, mod_lon, mod_landsea, mod_vza,time2d,time1d = self.process_mod03()
         if any(v is None for v in (mod_lat, mod_lon, mod_landsea)):
             self.log.error("Error retrieving MODIS lat/lon/land‑sea mask")
             return None
-        if np.isnan(mod_lat).any() or np.isnan(mod_lon).any() or (mod_lat<-444.0).any() or (mod_lon <-444.0).any() :
-            self.log.error("NaN detected in MODIS lat/lon; returning None.")
-            return None         
+        mod_geo_valid = self._valid_latlon_mask(mod_lat, mod_lon)
+        if not np.any(mod_geo_valid):
+            self.log.error("No valid MODIS lat/lon values; returning None.")
+            return None
+        invalid_geo_count = int(mod_geo_valid.size - np.count_nonzero(mod_geo_valid))
+        if invalid_geo_count:
+            self.log.warning(
+                "Ignoring %d invalid MODIS geolocation pixels before reprojection.",
+                invalid_geo_count,
+            )
         
         # ---------- 2. Read MISR geo ----------
         misr_lat, misr_lon = self.get_misr_geo()
@@ -196,7 +310,7 @@ class MODISMISRProcessor:
 
         # ---------- 3. Overlap mask ----------
         misr_mod_swath = self.misr_to_modis(misr_lat, misr_lon, mod_lat, mod_lon, misr_lat)
-        if np.all(misr_mod_swath<=-999) or misr_mod_swath is None :
+        if misr_mod_swath is None or np.all(misr_mod_swath <= -999):
             print('return')
             self.log.error("Error finding MISR swath on MODIS grid")
             return None
@@ -204,7 +318,24 @@ class MODISMISRProcessor:
         if any(v is None for v in (valid_rows, valid_cols)):
             self.log.error("Error retrieving MISR lat/lon")
             return None 
-        
+        rows_before = np.count_nonzero(valid_rows)
+        cols_before = np.count_nonzero(valid_cols)
+        valid_rows, valid_cols = self._prune_invalid_geo_from_rect(
+            valid_rows,
+            valid_cols,
+            mod_geo_valid,
+        )
+        if not np.any(valid_rows) or not np.any(valid_cols):
+            self.log.error("No valid MODIS/MISR overlap remains after removing invalid MODIS geolocation.")
+            return None
+        rows_after = np.count_nonzero(valid_rows)
+        cols_after = np.count_nonzero(valid_cols)
+        if rows_after != rows_before or cols_after != cols_before:
+            self.log.warning(
+                "Removed %d rows and %d columns from the MODIS/MISR overlap because of invalid MODIS geolocation.",
+                rows_before - rows_after,
+                cols_before - cols_after,
+            )
         # Helper to slice MODIS arrays to the MISR footprintprint(valid_rows)
         s = lambda arr: self.apply_valid_indices(arr, valid_rows, valid_cols)
 
@@ -214,8 +345,13 @@ class MODISMISRProcessor:
             'lon'     : s(mod_lon),
             'landsea' : s(mod_landsea),
             'vza'     : s(mod_vza),
+            'time2d'  : s(time2d),
+            'time1d'  : time1d[valid_rows],
+            'orig_row_index' : np.flatnonzero(valid_rows).astype(np.int32),
+            'orig_col_index' : np.flatnonzero(valid_cols).astype(np.int32),
+            'orig_nrows'     : np.int32(mod_lat.shape[0]),
+            'orig_ncols'     : np.int32(mod_lat.shape[1]),
         }
-
         # ---------- 5. Bands BT/radiance (needed only if MOD06 is used) ----------
         if process_mod06_cth:
             bands_BT = self.process_mod21(save_format=scale_flag)
@@ -272,9 +408,13 @@ class MODISMISRProcessor:
 
             misr_cth = h_msl_f.reshape(misr_lon.shape, order="C")
             qi_data = self.misr_to_modis(misr_lat, misr_lon, out['mod_geo']['lat'], out['mod_geo']['lon'], misr_cth_qa) 
+            misrcth_data = self.misr_to_modis(misr_lat, misr_lon, out['mod_geo']['lat'], out['mod_geo']['lon'], misr_cth)
+            if qi_data is None or misrcth_data is None:
+                self.log.error("Error resampling MISR CTH/QA to MODIS grid")
+                return None
             qi_data_int8 = self._to_qi_int8(qi_data)  
             out['misr_cth'] = {
-                'misrcth'    : self.misr_to_modis(misr_lat, misr_lon, out['mod_geo']['lat'], out['mod_geo']['lon'], misr_cth),
+                'misrcth'    : misrcth_data,
                 'misrcth_qa' : qi_data_int8
             }
             del lonf, latf, hf,h_msl_f
@@ -583,7 +723,7 @@ class ERA5Processor:
 
         surface_pressures = np.asfortranarray((var_single['surface_pressure'].astype(np.float32)) / 100.0)  # Convert to hPa
         W_surface = np.asfortranarray(var_single['swmr'].astype(np.float32))
-        T_skin = np.asfortranarray(var_single['skint'].astype(np.float32))
+        T_surface_air = np.asfortranarray(var_single['temp2m'].astype(np.float32))
         T_sst = np.asfortranarray(var_single['sst'].astype(np.float32))
 
     
@@ -597,7 +737,7 @@ class ERA5Processor:
 
         interpolate_to_pressure_levels(
             era5_levels_1d, modis_levels_1d, T_multi, W_multi, Z_multi,
-            surface_pressures, W_surface, T_skin, T_sst, T_modis, W_modis, Z_modis,
+            surface_pressures, W_surface, T_surface_air, T_sst, T_modis, W_modis, Z_modis,
         )
         T_interpolated = np.asfortranarray(T_modis)
         W_interpolated = np.asfortranarray(W_modis)
@@ -680,8 +820,9 @@ class MainProcessor:
         inputfile_list: list[str],
         orbit: str = None,
         logger: Optional[logging.Logger] = None,
-        output_dir: str = "/data/keeling/a/gzhao1/f/mmcth/ds_output/",
+        output_dir: str = "ds_output",
         save_flag: str = 'not_debug',
+        destripe_flag: bool = True,
     ):
         # ------------------------ 2.  local logger -------------------------
         # if caller passes None we fall back to a class‑scoped one
@@ -692,7 +833,10 @@ class MainProcessor:
             sys.exit()
 
         self.input_files = inputfile_list
-        self.output_dir = output_dir
+        self.destripe_flag = destripe_flag
+        output_dir = os.path.abspath(os.path.expanduser(output_dir))
+        os.makedirs(output_dir, exist_ok=True)
+        self.output_dir = output_dir + os.sep
         self.mod21_file = self.input_files[0]
         self.mod06_file = self.input_files[1]
         self.mod03_file = self.input_files[2]
@@ -704,7 +848,11 @@ class MainProcessor:
         # ------------------------------------------------------------------
         #  downstream processors (they, too, now accept logger=None)
         # ------------------------------------------------------------------
-        self.mm_processor  = MODISMISRProcessor(inputfile_list, logger=self.log)
+        self.mm_processor  = MODISMISRProcessor(
+            inputfile_list,
+            logger=self.log,
+            destripe_flag=self.destripe_flag,
+        )
         self.era5_processor = ERA5Processor(inputfile_list, logger=self.log)
 
         self.timestamp = re.search(r"\.A\d{7}\.(\d{4})\.", inputfile_list[0]).group(1)
@@ -725,7 +873,6 @@ class MainProcessor:
         self.cflag_mm_valid = 5
         self.cflag_mm_invalid = 6 
         self.orbit = 'O' + str(orbit).zfill(6)
-        self.output_dir = output_dir
 
     def extract_modis_metadata(self):
         # Extract the global attributes from the MODIS 06 files... (Furture work....)
@@ -794,10 +941,28 @@ class MainProcessor:
                 averaged_dict[key] = _block_reduce_last2(variable, block_size)
             except Exception as e:
                 # Never let one field kill the rank
-                self.logger.warning("block_average_dict: key=%s shape=%s fallback to None (%s)",
+                self.log.warning("block_average_dict: key=%s shape=%s fallback to None (%s)",
                                     key, getattr(variable, "shape", None), e)
                 averaged_dict[key] = None
         return averaged_dict
+
+    def convert_output_pressures_to_hpa(self, variable_dict):
+        """
+        ERA5 single-level pressure fields are read and used internally in Pa,
+        while the saved product schema declares these fields as hPa.
+        """
+        for key in ("surface_pressure", "msp"):
+            value = variable_dict.get(key)
+            if value is None:
+                continue
+
+            arr = np.asarray(value, dtype=np.float32)
+            finite = np.isfinite(arr)
+            if np.any(finite) and np.nanmedian(arr[finite]) > 2000.0:
+                variable_dict[key] = (arr / 100.0).astype(np.float32, copy=False)
+            else:
+                variable_dict[key] = arr
+        return variable_dict
 
 
     def calculate_block_lat_lon(self, era5_lats, era5_lons, block_size=10, center_choice="upper"):
@@ -832,6 +997,7 @@ class MainProcessor:
         # 1) Aggregate ERA5 to 10 km
         from os.path import basename
         era5_variables_10km = self.block_average_dict(era5_variables_misrswath)
+        era5_variables_10km = self.convert_output_pressures_to_hpa(era5_variables_10km)
         era5_lat_10km, era5_lon_10km = self.calculate_block_lat_lon(mod_geo['lat'], mod_geo['lon'], block_size=10)
         era5_variables_10km['ERA5Latitude']  = era5_lat_10km.astype(np.float32)
         era5_variables_10km['ERA5Longitude'] = era5_lon_10km.astype(np.float32)
@@ -859,6 +1025,14 @@ class MainProcessor:
         else:
             missing_flag = 'No Way'
         mmcth = XarraySaver(outputfile_name, logger=self.log)
+        ga = {
+            "orbit_number": orbit_num,
+            "missing_flag": missing_flag,
+        }
+        if "orig_nrows" in mod_geo:
+            ga["original_modis_nrows"] = int(mod_geo["orig_nrows"])
+        if "orig_ncols" in mod_geo:
+            ga["original_modis_ncols"] = int(mod_geo["orig_ncols"])
         mmcth.save_mm(
             mm_variables=mm_variables,
             mm_geo=mod_geo,
@@ -866,16 +1040,11 @@ class MainProcessor:
             modis_variables=mod06,
             era5_variables=era5_variables_10km,
             input_files=base_files,
-            global_attrs={
-                # CF/global attrs usually avoid spaces in keys; underscores are safer:
-                "orbit_number": orbit_num,
-                "Missing Flag": missing_flag,
-            },
+            global_attrs=ga,
             var_attrs={
                 "ERA5Latitude":  {"standard_name": "latitude",  "units": "degrees_north"},
                 "ERA5Longitude": {"standard_name": "longitude", "units": "degrees_east"},
             }
-            # var_attrs=...  # optional per-variable attr overrides
         )
         return
    
@@ -896,6 +1065,13 @@ class MainProcessor:
             np.int32(nx),
             np.int32(ny)
         ).astype(np.float32)  # (x, y) in hPa
+        bad = (
+            (~np.isfinite(misr_cth_2d)) |
+            (misr_cth_2d <= self.misr_cth_invalid) |
+            (~np.isfinite(misr_ctp_full)) |
+            (misr_ctp_full <= 0.0)
+        )
+        misr_ctp_full[bad] = np.nan
         return misr_ctp_full
     
     def process_pixel_level(self,
@@ -904,7 +1080,9 @@ class MainProcessor:
                         mod_geo,
                         misr_cth,
                         era5_variables_misrswath,
-                        met_date):
+                        met_date,
+                        diagnostic_path: Optional[str] = None,
+                        max_diagnostic_pixels: int = 2000):
         """
         Scene-wide call to modis.process_selected_pixels (Fortran/f2py).
         This version is careful about dtype + Fortran order to avoid f2py copies.
@@ -961,6 +1139,7 @@ class MainProcessor:
         surftmp[landsea == 1] = skint[landsea == 1]
 
         misr_ctp_flat = np.asfortranarray(misr_ctp_full).reshape(npix_full, order="F")
+        misr_ctp_raw_flat = misr_ctp_flat.copy()
         bad = (misr_ctp_flat > 1050.0)
         misr_ctp_flat[bad] = psfc[bad]
 
@@ -1011,7 +1190,17 @@ class MainProcessor:
         # ----------------------------
         # 6) Call Fortran
         # ----------------------------
-        ctp_out, cth_out, emis_out, od_out, qf_out = modis.process_selected_pixels(
+        (
+            ctp_out,
+            cth_out,
+            emis_out,
+            od_out,
+            qf_out,
+            ml_z_out,
+            ml_flag_out,
+            failure_out,
+            bias_out,
+        ) = modis.process_selected_pixels(
             wprof=wprof,
             tprof=tprof,
             hprof=hprof,
@@ -1044,9 +1233,402 @@ class MainProcessor:
         emis_map = np.asarray(emis_out).reshape(nx, ny, order="F")
         od_map   = np.asarray(od_out).reshape(nx, ny, order="F")
         qf_map   = np.asarray(qf_out).reshape(nx, ny, order="F")
+        ml_z_map = np.asarray(ml_z_out, dtype=np.float32).reshape(nx, ny, order="F")
+        ml_flag_map = np.asarray(ml_flag_out, dtype=np.int8).reshape(nx, ny, order="F")
+        failure_map = np.asarray(failure_out, dtype=np.int8).reshape(nx, ny, order="F")
 
-        return ctp_map, cth_map, emis_map, od_map, qf_map
+        if diagnostic_path is not None:
+            self._save_co2_failure_diagnostics(
+                diagnostic_path=diagnostic_path,
+                max_pixels=max_diagnostic_pixels,
+                nx=nx,
+                ny=ny,
+                wprof=wprof,
+                tprof=tprof,
+                hprof=hprof,
+                psfc=psfc,
+                pmsl=pmsl,
+                surftmp=surftmp,
+                view=view,
+                trad_scene=trad_scene,
+                clear_sky_bias=np.asarray(bias_out, dtype=np.float32),
+                rlat=rlat,
+                rlon=rlon,
+                landsea=landsea,
+                misr_ctp=misr_ctp_flat,
+                misr_ctp_raw=misr_ctp_raw_flat,
+                misr_cth=misr_cth_flat,
+                mod_cth=mod_cth_flat,
+                mod_ctp=mod_ctp_flat,
+                mod_method=mod_method_flat,
+                mod_opt=mod_opt_flat,
+                mod_emi=mod_emi_flat,
+                met_date=np.asarray(met_date, dtype=np.int32),
+                qf_out=np.asarray(qf_out, dtype=np.int16),
+                failure_out=np.asarray(failure_out, dtype=np.int16),
+                ml_z_out=np.asarray(ml_z_out, dtype=np.float32),
+                ml_flag_out=np.asarray(ml_flag_out, dtype=np.int16),
+                mod_geo=mod_geo,
+            )
+
+        return ctp_map, cth_map, emis_map, od_map, qf_map, ml_z_map, ml_flag_map, failure_map
     
+    def _save_co2_failure_diagnostics(
+        self,
+        *,
+        diagnostic_path: str,
+        max_pixels: int,
+        nx: int,
+        ny: int,
+        wprof: np.ndarray,
+        tprof: np.ndarray,
+        hprof: np.ndarray,
+        psfc: np.ndarray,
+        pmsl: np.ndarray,
+        surftmp: np.ndarray,
+        view: np.ndarray,
+        trad_scene: np.ndarray,
+        clear_sky_bias: np.ndarray,
+        rlat: np.ndarray,
+        rlon: np.ndarray,
+        landsea: np.ndarray,
+        misr_ctp: np.ndarray,
+        misr_ctp_raw: np.ndarray,
+        misr_cth: np.ndarray,
+        mod_cth: np.ndarray,
+        mod_ctp: np.ndarray,
+        mod_method: np.ndarray,
+        mod_opt: np.ndarray,
+        mod_emi: np.ndarray,
+        met_date: np.ndarray,
+        qf_out: np.ndarray,
+        failure_out: np.ndarray,
+        ml_z_out: np.ndarray,
+        ml_flag_out: np.ndarray,
+        mod_geo: dict,
+    ) -> None:
+        """Write profile-rich diagnostics for nonzero MM diagnostic reasons."""
+
+        os.makedirs(os.path.dirname(diagnostic_path), exist_ok=True)
+
+        valid_misr = np.isfinite(misr_cth) & (misr_cth > -500.0) & (misr_cth <= 20000.0)
+        valid_mod = np.isfinite(mod_cth) & (mod_cth > 0.0) & (mod_cth <= 20000.0)
+        eligible = valid_misr & valid_mod & (mod_cth > misr_cth)
+        attempted_target = (failure_out > 0) & (failure_out != 10) & eligible
+        skipped_target = (failure_out == 10) & eligible
+        max_pixels = max(0, int(max_pixels))
+        selected = np.flatnonzero(attempted_target)[:max_pixels]
+        if selected.size < max_pixels:
+            skipped = np.flatnonzero(skipped_target)[: max_pixels - selected.size]
+            selected = np.concatenate([selected, skipped])
+
+        pressure = np.asarray(self.era5_processor.P_levels, dtype=np.float32)
+        bands = np.array([36, 35, 34, 33, 31], dtype=np.int16)
+        pair = np.array(["36_35", "35_34", "35_33", "34_33"], dtype=object)
+        n = selected.size
+        nlev = pressure.size
+        nb = bands.size
+        npair = pair.size
+
+        def f1(fill=np.nan, dtype=np.float32):
+            a = np.empty(n, dtype=dtype)
+            a[...] = fill
+            return a
+
+        def f2(shape, fill=np.nan, dtype=np.float32):
+            a = np.empty(shape, dtype=dtype)
+            a[...] = fill
+            return a
+
+        row = (selected % nx).astype(np.int32)
+        col = (selected // nx).astype(np.int32)
+        orig_row = row.copy()
+        orig_col = col.copy()
+        if "orig_row_index" in mod_geo:
+            orig_row = np.asarray(mod_geo["orig_row_index"], dtype=np.int32)[row]
+        if "orig_col_index" in mod_geo:
+            orig_col = np.asarray(mod_geo["orig_col_index"], dtype=np.int32)[col]
+
+        one_ctp = f1()
+        one_cth = f1()
+        one_emi = f1()
+        one_od = f1()
+        one_mask = f1(fill=0, dtype=np.int16)
+        one_reason = f1(fill=0, dtype=np.int16)
+
+        two_ctp = f1()
+        two_cth = f1()
+        two_emi = f1()
+        two_od = f1()
+        two_mask = f1(fill=0, dtype=np.int16)
+        two_reason = f1(fill=0, dtype=np.int16)
+        misr_ctp_used = f1()
+
+        diag_isp = f1(fill=0, dtype=np.int16)
+        diag_imisr = f1(fill=0, dtype=np.int16)
+        diag_ltrp = f1(fill=0, dtype=np.int16)
+        diag_lco2 = f1(fill=0, dtype=np.int16)
+        diag_ipco2 = f1(fill=0, dtype=np.int16)
+        pair_status = f2((n, npair), fill=0, dtype=np.int16)
+        krto = f2((n, npair), fill=0, dtype=np.int16)
+        lev = f2((n, npair))
+        ctp_pres = f2((n, npair))
+        tmisr = f1()
+        emis_num = f1()
+        emis_den = f1()
+        emis_ratio = f1()
+        rwcld = f1()
+        tcold = f2((n, nb))
+        robs = f2((n, nb))
+        rclr = f2((n, nb))
+        delr = f2((n, nb))
+        tpad = f2((n, nlev))
+        wpad = f2((n, nlev))
+        ozpad = f2((n, nlev))
+        taup = f2((n, nlev, nb))
+        ra = f2((n, nlev, nb))
+        radiance_input = f2((n, nb))
+        radiance_adjusted = f2((n, nb))
+        wprof_out = f2((n, nlev))
+        tprof_out = f2((n, nlev))
+        hprof_out = f2((n, nlev))
+
+        for out_i, pix in enumerate(selected):
+            pix = int(pix)
+            trad_raw = np.asarray(trad_scene[:, pix], dtype=np.float32)
+            trad_adj = np.asarray(trad_raw + clear_sky_bias, dtype=np.float32)
+            radiance_input[out_i, :] = trad_raw
+            radiance_adjusted[out_i, :] = trad_adj
+            wprof_out[out_i, :] = wprof[:, pix]
+            tprof_out[out_i, :] = tprof[:, pix]
+            hprof_out[out_i, :] = hprof[:, pix]
+
+            ctp_l = misr_ctp[pix]
+            if (not np.isfinite(ctp_l)) or ctp_l <= 0.0 or ctp_l < pressure[0] or ctp_l > psfc[pix]:
+                ctp_l = psfc[pix]
+            misr_ctp_used[out_i] = ctp_l
+
+            one = modis.co2cld_onepixel_misr_debug(
+                wprof[:, pix], tprof[:, pix], hprof[:, pix],
+                psfc[pix], pmsl[pix], surftmp[pix], view[pix],
+                trad_adj, met_date, rlat[pix], rlon[pix], landsea[pix], psfc[pix],
+            )
+            two = modis.co2cld_onepixel_misr_debug(
+                wprof[:, pix], tprof[:, pix], hprof[:, pix],
+                psfc[pix], pmsl[pix], surftmp[pix], view[pix],
+                trad_adj, met_date, rlat[pix], rlon[pix], landsea[pix], ctp_l,
+            )
+
+            one_ctp[out_i], one_cth[out_i], one_emi[out_i], one_od[out_i] = one[:4]
+            one_mask[out_i] = one[4]
+            one_reason[out_i] = one[5]
+
+            two_ctp[out_i], two_cth[out_i], two_emi[out_i], two_od[out_i] = two[:4]
+            two_mask[out_i] = two[4]
+            two_reason[out_i] = two[5]
+            diag_isp[out_i], diag_imisr[out_i], diag_ltrp[out_i] = two[6:9]
+            diag_lco2[out_i], diag_ipco2[out_i] = two[9:11]
+            pair_status[out_i, :] = two[11]
+            krto[out_i, :] = two[12]
+            lev[out_i, :] = two[13]
+            ctp_pres[out_i, :] = two[14]
+            tmisr[out_i], emis_num[out_i], emis_den[out_i] = two[15:18]
+            emis_ratio[out_i], rwcld[out_i] = two[18:20]
+            tcold[out_i, :] = two[20]
+            robs[out_i, :] = two[21]
+            rclr[out_i, :] = two[22]
+            delr[out_i, :] = two[23]
+            tpad[out_i, :] = two[24]
+            wpad[out_i, :] = two[25]
+            ozpad[out_i, :] = two[26]
+            taup[out_i, :, :] = two[27]
+            ra[out_i, :, :] = two[28]
+
+        coords = {
+            "diagnostic_pixel": np.arange(n, dtype=np.int32),
+            "level": pressure,
+            "band": bands,
+            "pair": pair,
+        }
+        ds = xr.Dataset(coords=coords)
+        dims_pix = ("diagnostic_pixel",)
+        dims_prof = ("diagnostic_pixel", "level")
+        dims_band = ("diagnostic_pixel", "band")
+        dims_pair = ("diagnostic_pixel", "pair")
+        dims_prof_band = ("diagnostic_pixel", "level", "band")
+
+        for name, data in {
+            "flat_index_fortran0": selected.astype(np.int32),
+            "swath_row": row,
+            "swath_col": col,
+            "original_modis_row": orig_row,
+            "original_modis_col": orig_col,
+            "Latitude": rlat[selected].astype(np.float32),
+            "Longitude": rlon[selected].astype(np.float32),
+            "MM_Flag": qf_out[selected].astype(np.int16),
+            "MM_FailureReason": failure_out[selected].astype(np.int16),
+            "MM_MultilayerZScore": ml_z_out[selected].astype(np.float32),
+            "MM_MultilayerConfidenceFlag": ml_flag_out[selected].astype(np.int16),
+            "MISR_CloudTopHeight": misr_cth[selected].astype(np.float32),
+            "MISR_CloudTopPressure_Input": misr_ctp_raw[selected].astype(np.float32),
+            "MISR_CloudTopPressure_Used": misr_ctp_used.astype(np.float32),
+            "MODIS_CloudTopHeight": mod_cth[selected].astype(np.float32),
+            "MODIS_CloudTopPressure": mod_ctp[selected].astype(np.float32),
+            "MODIS_CloudTopMethod": mod_method[selected].astype(np.int16),
+            "MODIS_CloudOpticalDepth": mod_opt[selected].astype(np.float32),
+            "MODIS_CloudEffectiveEmissivity": mod_emi[selected].astype(np.float32),
+            "SurfacePressure": psfc[selected].astype(np.float32),
+            "MeanSeaLevelPressure": pmsl[selected].astype(np.float32),
+            "SurfaceTemperature": surftmp[selected].astype(np.float32),
+            "SensorZenithAngle": view[selected].astype(np.float32),
+            "LandSeaFlag": landsea[selected].astype(np.int16),
+            "OneLayer_CTP": one_ctp,
+            "OneLayer_CTH": one_cth,
+            "OneLayer_Emissivity": one_emi,
+            "OneLayer_OpticalDepth": one_od,
+            "OneLayer_InternalProcessingMask": one_mask,
+            "OneLayer_FailureReason": one_reason,
+            "TwoLayer_CandidateCTP": two_ctp,
+            "TwoLayer_CandidateCTH": two_cth,
+            "TwoLayer_CandidateEmissivity": two_emi,
+            "TwoLayer_CandidateOpticalDepth": two_od,
+            "TwoLayer_InternalProcessingMask": two_mask,
+            "TwoLayer_FailureReason": two_reason,
+            "diag_isp": diag_isp,
+            "diag_imisr": diag_imisr,
+            "diag_ltrp": diag_ltrp,
+            "diag_lco2": diag_lco2,
+            "diag_ipco2": diag_ipco2,
+            "diag_tmisr": tmisr,
+            "emissivity_numerator": emis_num,
+            "emissivity_denominator": emis_den,
+            "emissivity_ratio": emis_ratio,
+            "window_cloud_radiance": rwcld,
+        }.items():
+            ds[name] = xr.DataArray(data, dims=dims_pix)
+
+        ds["Radiance_Input"] = xr.DataArray(radiance_input, dims=dims_band)
+        ds["Radiance_Adjusted"] = xr.DataArray(radiance_adjusted, dims=dims_band)
+        ds["BrightnessTemperature_FromRadiance"] = xr.DataArray(tcold, dims=dims_band)
+        ds["ObservedCloudyRadiance"] = xr.DataArray(robs, dims=dims_band)
+        ds["ModeledLowerBoundaryRadiance"] = xr.DataArray(rclr, dims=dims_band)
+        ds["ObservedMinusModeledRadiance"] = xr.DataArray(delr, dims=dims_band)
+        ds["WaterVaporProfile"] = xr.DataArray(wprof_out, dims=dims_prof)
+        ds["TemperatureProfile"] = xr.DataArray(tprof_out, dims=dims_prof)
+        ds["HeightProfile"] = xr.DataArray(hprof_out, dims=dims_prof)
+        ds["TemperatureProfile_Padded"] = xr.DataArray(tpad, dims=dims_prof)
+        ds["WaterVaporProfile_Padded"] = xr.DataArray(wpad, dims=dims_prof)
+        ds["OzoneProfile_Padded"] = xr.DataArray(ozpad, dims=dims_prof)
+        ds["TransmittanceProfile"] = xr.DataArray(taup, dims=dims_prof_band)
+        ds["RadianceIntegral_RA"] = xr.DataArray(ra, dims=dims_prof_band)
+        ds["PairStatus"] = xr.DataArray(pair_status, dims=dims_pair)
+        ds["PairCrossingFlag"] = xr.DataArray(krto, dims=dims_pair)
+        ds["PairCrossingLevel"] = xr.DataArray(lev, dims=dims_pair)
+        ds["PairCloudTopPressure"] = xr.DataArray(ctp_pres, dims=dims_pair)
+        ds["SceneClearSkyBias"] = xr.DataArray(clear_sky_bias.astype(np.float32), dims=("band",))
+
+        units = {
+            "level": "hPa",
+            "Latitude": "degrees_north",
+            "Longitude": "degrees_east",
+            "MISR_CloudTopHeight": "m",
+            "MISR_CloudTopPressure_Input": "hPa",
+            "MISR_CloudTopPressure_Used": "hPa",
+            "MODIS_CloudTopHeight": "m",
+            "MODIS_CloudTopPressure": "hPa",
+            "MODIS_CloudOpticalDepth": "1",
+            "MODIS_CloudEffectiveEmissivity": "1",
+            "SurfacePressure": "hPa",
+            "MeanSeaLevelPressure": "hPa",
+            "SurfaceTemperature": "K",
+            "SensorZenithAngle": "degrees",
+            "OneLayer_CTP": "hPa",
+            "OneLayer_CTH": "km",
+            "OneLayer_Emissivity": "1",
+            "OneLayer_OpticalDepth": "1",
+            "TwoLayer_CandidateCTP": "hPa",
+            "TwoLayer_CandidateCTH": "km",
+            "TwoLayer_CandidateEmissivity": "1",
+            "TwoLayer_CandidateOpticalDepth": "1",
+            "diag_tmisr": "K",
+            "WaterVaporProfile": "g kg-1",
+            "TemperatureProfile": "K",
+            "HeightProfile": "km",
+            "TemperatureProfile_Padded": "K",
+            "WaterVaporProfile_Padded": "g kg-1",
+            "OzoneProfile_Padded": "ppmv",
+            "TransmittanceProfile": "1",
+            "BrightnessTemperature_FromRadiance": "K",
+            "emissivity_ratio": "1",
+            "PairCloudTopPressure": "hPa",
+        }
+        for name, unit in units.items():
+            if name in ds:
+                ds[name].attrs["units"] = unit
+
+        for name in [
+            "Radiance_Input", "Radiance_Adjusted", "ObservedCloudyRadiance",
+            "ModeledLowerBoundaryRadiance", "ObservedMinusModeledRadiance",
+            "RadianceIntegral_RA", "SceneClearSkyBias", "window_cloud_radiance",
+        ]:
+            if name in ds:
+                ds[name].attrs["units"] = "radiance units used internally by modis_co2_slice.f90"
+
+        failure_flag_values = np.array(
+            [0, 10, 20, 21, 22, 23, 24, 30, 40, 41, 42, 50, 51, 52, 60, 61, 62, 70, 71],
+            dtype=np.int16,
+        )
+        failure_flag_meanings = (
+            "ok "
+            "not_attempted "
+            "invalid_misr_ctp "
+            "invalid_surface_pressure "
+            "invalid_modis_radiance "
+            "invalid_atmospheric_profile "
+            "pressure_grid_mapping_failed "
+            "no_vertical_search_domain "
+            "signal_below_noise "
+            "no_valid_ratio "
+            "no_ratio_crossing "
+            "candidate_not_above_misr "
+            "candidate_outside_band_range "
+            "no_selectable_band_pair "
+            "candidate_not_higher_than_one_layer "
+            "reference_one_layer_failed "
+            "candidate_has_no_valid_ctp_digit "
+            "ctp_ok_emissivity_denominator_bad "
+            "ctp_ok_emissivity_ratio_bad"
+        )
+        for name in ["MM_FailureReason", "OneLayer_FailureReason", "TwoLayer_FailureReason"]:
+            ds[name].attrs.update({
+                "flag_values": failure_flag_values,
+                "flag_meanings": failure_flag_meanings,
+            })
+        ds["PairStatus"].attrs.update({
+            "flag_values": np.array([0, 1, 2, 3, 4, 5], dtype=np.int16),
+            "flag_meanings": (
+                "not_evaluated skipped_radiance_signal no_valid_ratio_levels "
+                "no_zero_crossing zero_crossing_found selected_solution"
+            ),
+        })
+        ds.attrs.update({
+            "title": "CO2-slicing MM failure diagnostics",
+            "description": (
+                "Profile-rich diagnostics for pixels with a nonzero MM "
+                "two-layer diagnostic reason."
+            ),
+            "source": "src/pixel/modis_co2_slice.f90 co2cld_onepixel_misr_debug",
+            "diagnostic_pixel_selection": (
+                "MM_FailureReason > 0, valid MISR/MODIS CTH, and MODIS CTH > MISR CTH; "
+                "non-not_attempted reasons are selected first"
+            ),
+            "max_diagnostic_pixels": int(max_pixels),
+            "selected_diagnostic_pixels": int(n),
+            "algorithm_reference": "Mitra et al. 2023, JGR Atmospheres, doi:10.1029/2022JD038135",
+        })
+        ds.to_netcdf(diagnostic_path)
+        self.log.info("Saved CO2 failure diagnostics to %s with %d pixels", diagnostic_path, n)
+
     
     def _nan2d_like(self, geo2d, dtype=np.float32):
         a = np.empty_like(geo2d, dtype=dtype)
@@ -1081,6 +1663,7 @@ class MainProcessor:
           
         misr_cth_invalid = -600
         self.log.debug("Running the MISR/MODIS data processing pipeline")
+        co2_diagnostic = save_flag in {"co2_debug", "diagnostic", "mm_debug"}
         
         #!  Finish the part results only return two datasets 
         res = self.mm_processor.mm_process(
@@ -1121,7 +1704,12 @@ class MainProcessor:
         del era5_variables #release MEM
 
         self.log.debug("ERA5 processing completed successfully")
-          
+
+        if isinstance(misr_cth, dict) and misr_cth.get('misrcth') is not None:
+            misr_arr = np.asarray(misr_cth['misrcth'])
+            if np.any(misr_arr > misr_cth_invalid):
+                misr_cth['misrctp'] = self.convert_misr_cth_ctp(era5_variables_misrswath, misr_cth)
+
         # save_flag is for debugging 
         if save_flag == 'debug':
             outputfile_name = f'{self.output_dir}/debug/MODMISR_L2_CP_{self.mm_processor.id}_{self.mm_processor.orbit}_debug.nc'
@@ -1148,7 +1736,7 @@ class MainProcessor:
             else:
                 valid = (misr_arr > self.misr_cth_invalid)
                 mm_variables['cth'][valid]   = misr_arr[valid]
-                misr_ctp = self.convert_misr_cth_ctp(era5_variables_misrswath,misr_cth)
+                misr_ctp = misr_cth['misrctp']
                 mm_variables['ctp'][valid]   = misr_ctp[valid]
                 mm_variables['cflag'][valid] = self.cflag_misr_only
                 self.save_pixels(mm_variables, None, mod_geo, misr_cth, era5_variables_misrswath, outputfile_name)
@@ -1168,6 +1756,7 @@ class MainProcessor:
             self.log.info("MISR CTH missing; writing MODIS-only product.")
             misr_cth = {}
             misr_cth['misrcth'] = self._zeros2d_like(mod_geo['lat']) - np.nan# Need to be modifed 
+            misr_cth['misrctp'] = self._nan2d_like(mod_geo['lat'])
             misr_cth['misrcth_qa'] = self._zeros2d_like(mod_geo['lat'], dtype=np.int8)
             self.save_pixels(mm_variables, mod06, mod_geo, misr_cth, era5_variables_misrswath, outputfile_name)
             return
@@ -1176,15 +1765,31 @@ class MainProcessor:
         # Proceed with pixel-level processing  
         
         self.log.debug("Proceeding with pixel-level processing...")     
-        ctp_map,cth_map,emis_map,od_map,qf_map = self.process_pixel_level(bands_BT, mod06,mod_geo, misr_cth, era5_variables_misrswath,self.met_date)
+        diagnostic_path = None
+        if co2_diagnostic:
+            diagnostic_path = (
+                f"{self.output_dir}debug/"
+                f"MM_CO2FailureDiagnostics_{self.mm_processor.id}_{self.mm_processor.orbit}.nc"
+            )
+
+        ctp_map, cth_map, emis_map, od_map, qf_map, ml_z_map, ml_flag_map, failure_map = self.process_pixel_level(
+            bands_BT,
+            mod06,
+            mod_geo,
+            misr_cth,
+            era5_variables_misrswath,
+            self.met_date,
+            diagnostic_path=diagnostic_path,
+        )
         mm_variables['ctp']  =  ctp_map
         mm_variables['cth']  =  cth_map
         mm_variables['emissivity'] = emis_map
         mm_variables['opt'] = od_map
         mm_variables['cflag']= qf_map 
+        mm_variables['ml_zscore'] = ml_z_map
+        mm_variables['ml_flag'] = ml_flag_map
+        mm_variables['failure_reason'] = failure_map
         self.save_pixels(mm_variables, mod06, mod_geo, misr_cth, era5_variables_misrswath, outputfile_name)
         return
 
    
-
-
