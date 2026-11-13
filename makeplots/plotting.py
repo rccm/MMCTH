@@ -41,7 +41,10 @@ MM_FailureReason metadata:
         ctp_ok_emissivity_ratio_bad
 """
 
+from __future__ import annotations
+
 import argparse
+import csv
 import logging
 import os
 import sqlite3
@@ -71,14 +74,39 @@ from gen_plot import plot_mm_multipanel
 #  Paths
 # ---------------------------------------------------------------------
 MM_DIR = "/data/gdi/f/gzhao1/mmcth/ds_output/"
-MM_DIR = "/data/gdi/f/gzhao1/mmcth/test_output/"
+# MM_DIR = "/data/gdi/f/gzhao1/mmcth/test_output/"
 
 
 # ---------------------------------------------------------------------
-#  Optional overlay line
+#  Optional CATS overpass overlay
 # ---------------------------------------------------------------------
-x_line = []
-y_line = []
+CATS_OVERPASS_LINE_COLUMNS = (
+    "mm_line_0based",
+    "mm_line",
+    "line",
+    "row",
+    "mm_iy",
+    "pixel_line",
+)
+CATS_OVERPASS_COLUMN_COLUMNS = (
+    "mm_column_0based",
+    "mm_column",
+    "column",
+    "col",
+    "mm_ix",
+    "pixel_column",
+)
+CATS_OVERPASS_OVERLAY_KWARGS = {
+    "color": "fuchsia",
+    "linestyle": "None",
+    "linewidth": 0,
+    "marker": "s",
+    "markersize": 2.5,
+    "markerfacecolor": "fuchsia",
+    "markeredgecolor": "fuchsia",
+    "markeredgewidth": 0,
+    "alpha": 1.0,
+}
 
 
 # ---------------------------------------------------------------------
@@ -185,6 +213,57 @@ def parse_modis_id(s: str) -> str:
     return dt.strftime(f"%Y-%m-%d ({doy:03d}) %H:%M")
 
 
+def extract_year_from_modis_id(s: str) -> int | None:
+    """
+    Extract the year from a MODIS ID or filename fragment.
+
+    Accepts strings like:
+        A2015012.2005
+        .A2015012.2005.
+        MOD021KM.A2015012.2005.061...
+    """
+    match = re.search(r"A(?P<year>\d{4})\d{3}\.\d{4}", s)
+    if match is None:
+        return None
+    return int(match.group("year"))
+
+
+def mm_dir_is_flat(mm_dir: str) -> bool:
+    """The test output directory stores MM files directly, not by year."""
+    return Path(mm_dir).resolve().name == "test_output"
+
+
+def get_mm_search_dir(year: int | None = None) -> Path:
+    base_dir = Path(MM_DIR)
+
+    if mm_dir_is_flat(MM_DIR):
+        return base_dir
+
+    if year is None:
+        return base_dir
+
+    if base_dir.name == str(year):
+        return base_dir
+
+    return base_dir / str(year)
+
+
+def find_mm_files(mod_id: str, year: int | None = None) -> list[str]:
+    search_dir = get_mm_search_dir(year)
+    pattern = str(search_dir / f"MODMISR*{mod_id}*MM*.nc")
+    matches = sorted(glob.glob(pattern))
+
+    log.debug(
+        "MM lookup for MODIS ID %s year=%s using pattern %s found %d files",
+        mod_id,
+        year,
+        pattern,
+        len(matches),
+    )
+
+    return matches
+
+
 def create_connection(db_file: str) -> sqlite3.Connection | None:
     try:
         return sqlite3.connect(db_file)
@@ -196,6 +275,130 @@ def create_connection(db_file: str) -> sqlite3.Connection | None:
 def get_mm(mm_file: str):
     ds = xr.open_dataset(mm_file)
     return ds
+
+
+def first_existing_column(
+    fieldnames: list[str] | None,
+    candidates: tuple[str, ...],
+) -> str:
+    fields = set(fieldnames or [])
+    for candidate in candidates:
+        if candidate in fields:
+            return candidate
+    raise ValueError(
+        "CSV must contain one of these columns: {}".format(
+            ", ".join(candidates)
+        )
+    )
+
+
+def parse_pixel_index(value: str) -> int:
+    return int(round(float(value)))
+
+
+def read_cats_overpass_pixels(
+    csv_file: str | os.PathLike[str],
+    mm_file: str,
+    ds: xr.Dataset,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """
+    Read CATS/MM overlap CSV pixels as (x, y) plot indices.
+
+    The expected CSV is the one written by
+    plot_cats_profile_mm_granule.py. It uses MM-file row/column columns named
+    mm_line_0based and mm_column_0based. If a mm_granule column is present,
+    rows are filtered to the current MM granule basename.
+    """
+
+    csv_path = Path(csv_file).expanduser()
+    if not csv_path.is_file():
+        raise FileNotFoundError(f"CATS overpass CSV not found: {csv_path}")
+
+    target_mm_name = Path(mm_file).name
+    x_values = []
+    y_values = []
+    skipped_other_granules = 0
+    skipped_bad_rows = 0
+
+    with csv_path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        line_column = first_existing_column(
+            reader.fieldnames,
+            CATS_OVERPASS_LINE_COLUMNS,
+        )
+        column_column = first_existing_column(
+            reader.fieldnames,
+            CATS_OVERPASS_COLUMN_COLUMNS,
+        )
+        has_mm_granule = "mm_granule" in set(reader.fieldnames or [])
+
+        for row in reader:
+            if has_mm_granule:
+                row_mm_name = Path(row.get("mm_granule", "")).name
+                if row_mm_name and row_mm_name != target_mm_name:
+                    skipped_other_granules += 1
+                    continue
+
+            try:
+                y_values.append(parse_pixel_index(row[line_column]))
+                x_values.append(parse_pixel_index(row[column_column]))
+            except (KeyError, TypeError, ValueError):
+                skipped_bad_rows += 1
+
+    if not x_values:
+        log.warning(
+            "No CATS overpass pixels in %s matched MM granule %s",
+            csv_path,
+            target_mm_name,
+        )
+        if skipped_other_granules:
+            log.info(
+                "Skipped %d CATS overpass rows for other MM granules",
+                skipped_other_granules,
+            )
+        if skipped_bad_rows:
+            log.info("Skipped %d malformed CATS overpass rows", skipped_bad_rows)
+        return None
+
+    x = np.asarray(x_values, dtype=np.int64)
+    y = np.asarray(y_values, dtype=np.int64)
+
+    ny = int(ds.sizes["cell_along_swath_1km"])
+    nx = int(ds.sizes["cell_cross_swath_1km"])
+    in_bounds = (y >= 0) & (y < ny) & (x >= 0) & (x < nx)
+    if not np.all(in_bounds):
+        log.warning(
+            "Dropping %d CATS overpass pixels outside MM grid shape (%d, %d)",
+            int((~in_bounds).sum()),
+            ny,
+            nx,
+        )
+        x = x[in_bounds]
+        y = y[in_bounds]
+
+    if x.size == 0:
+        log.warning(
+            "CATS overpass CSV %s had no in-bounds pixels for %s",
+            csv_path,
+            target_mm_name,
+        )
+        return None
+
+    log.info(
+        "Loaded %d CATS overpass pixels from %s for %s",
+        x.size,
+        csv_path,
+        target_mm_name,
+    )
+    if skipped_other_granules:
+        log.debug(
+            "Skipped %d CATS overpass rows for other MM granules",
+            skipped_other_granules,
+        )
+    if skipped_bad_rows:
+        log.warning("Skipped %d malformed CATS overpass rows", skipped_bad_rows)
+
+    return x.astype(float), y.astype(float)
 
 
 def merge_rad_into_mm_1km(
@@ -382,7 +585,12 @@ def add_mm_failure_reason_plot_variable(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
-def fetch_and_process_group(inputfile_list: list[str], orbit_number: int):
+def fetch_and_process_group(
+    inputfile_list: list[str],
+    orbit_number: int,
+    mm_year: int | None = None,
+    cats_overpass_csv: str | None = None,
+):
     """
     Fetch/process one MODIS/MISR/ERA5 group, merge RGB/radiance data into
     MM output, and generate diagnostic plots.
@@ -414,10 +622,18 @@ def fetch_and_process_group(inputfile_list: list[str], orbit_number: int):
     # -----------------------------------------------------------------
     #  3. Find existing MM file
     # -----------------------------------------------------------------
-    matches = glob.glob(f"{MM_DIR}MODMISR*{mod_id}*MM*V00.nc")
+    search_year = mm_year
+    if search_year is None and not mm_dir_is_flat(MM_DIR):
+        search_year = extract_year_from_modis_id(mod_id)
+
+    matches = find_mm_files(mod_id, search_year)
 
     if not matches:
-        log.error("MM file does not exist for MODIS ID %s", mod_id)
+        log.error(
+            "MM file does not exist for MODIS ID %s in %s",
+            mod_id,
+            get_mm_search_dir(search_year),
+        )
         return None
 
     mm_file = matches[0]
@@ -433,6 +649,15 @@ def fetch_and_process_group(inputfile_list: list[str], orbit_number: int):
     # Mask fill value for MM_FailureReason before plotting.
     ds = mask_mm_failure_reason_fillvalue(ds)
     ds = add_mm_failure_reason_plot_variable(ds)
+
+    if cats_overpass_csv:
+        overlay_xy = read_cats_overpass_pixels(cats_overpass_csv, mm_file, ds)
+        overlay_kwargs = (
+            CATS_OVERPASS_OVERLAY_KWARGS if overlay_xy is not None else None
+        )
+    else:
+        overlay_xy = None
+        overlay_kwargs = None
 
     # -----------------------------------------------------------------
     #  5. Parse MODIS ID and orbit for plot title
@@ -473,11 +698,11 @@ def fetch_and_process_group(inputfile_list: list[str], orbit_number: int):
         ds,
         varnames=[
             "bt_31",
-            "MM_CloudTopHeight",
-            "MODIS_CloudTopHeight",
             "MISR_CloudTopHeight",
-            MM_FAILURE_REASON_PLOT_VAR,
+            "MODIS_CloudTopHeight",
+            "MM_CloudTopHeight",
             "MM_MultilayerConfidenceFlag",
+            MM_FAILURE_REASON_PLOT_VAR,            
         ],
         nrows=1,
         ncols=7,   # 1 RGB + 6 scalar panels
@@ -500,10 +725,10 @@ def fetch_and_process_group(inputfile_list: list[str], orbit_number: int):
         },
         vlims={
             "bt_31": (200, 300),
-            "MM_CloudTopHeight": (0, 16000),
             "MISR_CloudTopHeight": (0, 16000),
             "MODIS_CloudTopHeight": (0.01, 16000),
             "MM_CloudTopPressure": (100, 1000),
+            "MM_CloudTopHeight": (0, 16000),
             "MODIS_CloudOpticalDepth": (0, 7),
         },
         flip_cbar_vars={
@@ -523,12 +748,8 @@ def fetch_and_process_group(inputfile_list: list[str], orbit_number: int):
             "MM_MultilayerConfidenceFlag": "MM Multilayer Confidence",
         },
         rgb_title=f"{mod_id} -- {orbit}",
-        overlay_xy=(x_line, y_line),
-        overlay_kwargs={
-            "color": "fuchsia",
-            "linewidth": 2,
-            "marker": None,
-        },
+        overlay_xy=overlay_xy,
+        overlay_kwargs=overlay_kwargs,
         output=png_path_1,
     )
 
@@ -592,12 +813,8 @@ def fetch_and_process_group(inputfile_list: list[str], orbit_number: int):
             MM_FAILURE_REASON_PLOT_VAR: "MM Failure Reason",
         },
         rgb_title=f"{mod_id} -- {orbit}",
-        overlay_xy=(x_line, y_line),
-        overlay_kwargs={
-            "color": "fuchsia",
-            "linewidth": 2,
-            "marker": None,
-        },
+        overlay_xy=overlay_xy,
+        overlay_kwargs=overlay_kwargs,
         output=png_path_2,
     )
 
@@ -682,12 +899,8 @@ def fetch_and_process_group(inputfile_list: list[str], orbit_number: int):
             MM_FAILURE_REASON_PLOT_VAR: "MM Failure Reason",
         },
         rgb_title=f"{mod_id} -- {orbit}",
-        overlay_xy=(x_line, y_line),
-        overlay_kwargs={
-            "color": "fuchsia",
-            "linewidth": 2,
-            "marker": None,
-        },
+        overlay_xy=overlay_xy,
+        overlay_kwargs=overlay_kwargs,
         output=png_path_3,
     )
 
@@ -723,6 +936,14 @@ def main() -> None:
         help="If set with --start-date, span this many months inclusive",
     )
     p.add_argument("-f", "--mmfile", type=str, help="MM file")
+    p.add_argument(
+        "--cats-overpass-csv",
+        type=str,
+        help=(
+            "CSV from plot_cats_profile_mm_granule.py. When set, matching "
+            "MM line/column pixels are overlaid in fuchsia on each panel."
+        ),
+    )
 
     args = p.parse_args()
 
@@ -735,6 +956,13 @@ def main() -> None:
 
     logging.getLogger().setLevel(level)
 
+    if (
+        args.cats_overpass_csv
+        and not Path(args.cats_overpass_csv).expanduser().is_file()
+    ):
+        log.error("CATS overpass CSV does not exist: %s", args.cats_overpass_csv)
+        sys.exit(1)
+
     conn = create_connection(db_path)
     if conn is None:
         sys.exit(1)
@@ -742,6 +970,8 @@ def main() -> None:
     # -----------------------------------------------------------------
     #  Fetch file groups
     # -----------------------------------------------------------------
+    mm_year = None
+
     if args.start_date and args.end_date:
         groups, orbit_info = fetch_methods.fetch_files_by_date_range(
             conn,
@@ -763,6 +993,7 @@ def main() -> None:
 
         month, day = map(int, args.date.split("-"))
         stamp = f"{args.year}-{month:02d}-{day:02d}"
+        mm_year = args.year
 
         groups, orbit_info = fetch_methods.fetch_files_by_date(conn, stamp)
 
@@ -776,6 +1007,7 @@ def main() -> None:
             args.year,
             args.month,
         )
+        mm_year = args.year
 
     elif args.orbit:
         groups, orbit_info = fetch_methods.fetch_files_by_orbit(
@@ -783,18 +1015,21 @@ def main() -> None:
             args.orbit,
             False,
         )
+        mm_year = args.year
 
     elif args.modisid:
         groups, orbit_info = fetch_methods.fetch_files_by_modisid(
             conn,
             args.modisid,
         )
+        mm_year = args.year or extract_year_from_modis_id(args.modisid)
 
     elif args.mmfile:
-        m = re.search(r"_A(\d{7}\.\d{4})_(O\d{6})_", args.mmfile)
+        m = re.search(r"_A(\d{7}\.\d{4})_", args.mmfile)
 
         if m:
             modis_id = f".A{m.group(1)}."
+            mm_year = args.year or extract_year_from_modis_id(modis_id)
         else:
             log.error("Could not parse MODIS ID from mmfile: %s", args.mmfile)
             sys.exit(1)
@@ -813,6 +1048,7 @@ def main() -> None:
             sys.exit(1)
 
         groups, orbit_info = fetch_methods.fetch_files_by_year(conn, args.year)
+        mm_year = args.year
 
     group_ids = list(groups.keys())
 
@@ -845,7 +1081,12 @@ def main() -> None:
         print(f"Files: {groups[gid]}")
 
         try:
-            fetch_and_process_group(groups[gid], orbit_number)
+            fetch_and_process_group(
+                groups[gid],
+                orbit_number,
+                mm_year=mm_year,
+                cats_overpass_csv=args.cats_overpass_csv,
+            )
 
         except ValueError as e:
             log.warning(

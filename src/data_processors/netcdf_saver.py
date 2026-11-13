@@ -120,6 +120,7 @@ class NetCDFSaver:
                 'Latitude': {'dtype': 'float32'},
                 'Longitude': {'dtype': 'float32'},
                 'VZA': {'dtype': 'float32'},
+                'SZA': {'dtype': 'float32'},
                 'ERA5Geopotential': {'dtype': 'float32'},
                 'ERA5Temperature': {'dtype': 'float32'},
                 'ERA5Humidity': {'dtype': 'float32'},
@@ -239,6 +240,12 @@ class NetCDFSaver:
                 {'cell_along_swath_1km': x_cell_along_swath_1km, 'cell_cross_swath_1km': y_cell_cross_swath_1km}
             ),
         }
+        if 'sza' in mm_geo:
+            data_dict['SZA'] = (
+                mm_geo['sza'],
+                ['cell_along_swath_1km', 'cell_cross_swath_1km'],
+                {'cell_along_swath_1km': x_cell_along_swath_1km, 'cell_cross_swath_1km': y_cell_cross_swath_1km}
+            )
 
         # Add MODIS variables if available
         if modis_variables:
@@ -427,6 +434,13 @@ class NetCDFSaver:
                 'valid_range': [0, 90],
                 '_FillValue': -9999
             },
+            'SZA': {
+                'long_name': 'solar viewing zenith angle',
+                'units': 'degrees',
+                'valid_range': [0, 180],
+                'coordinates': 'Latitude Longitude pixel_time',
+                '_FillValue': -9999.0
+            },
 
             # ERA5 fields with 2D lat/lon arrays
             'ERA5Geopotential': {
@@ -514,6 +528,8 @@ class NetCDFSaver:
             data_vars["latitude"] = (["latitude"], cell_along_swath_1km)  # Lat for each row (assuming uniform for each row)
             data_vars["longitude"] = (["longitude"], cell_cross_swath_1km)  # Lon for each column (assuming uniform for each column)
             data_vars["vza"] = (["latitude", "longitude"], mod_geo['vza'])
+            if "sza" in mod_geo:
+                data_vars["SZA"] = (["latitude", "longitude"], mod_geo["sza"])
 
             # Create a dataset
             ds = xr.Dataset(
@@ -558,6 +574,10 @@ class NetCDFSaver:
                 ds["mod06_product"].attrs["units"] = "Unknown"
             ds["landsea"].attrs["units"] = "Unknown"
             ds["vza"].attrs["units"] = "degrees"
+            if "SZA" in ds:
+                ds["SZA"].attrs["long_name"] = "solar viewing zenith angle"
+                ds["SZA"].attrs["units"] = "degrees"
+                ds["SZA"].attrs["coordinates"] = "Latitude Longitude pixel_time"
 
             # Save to NetCDF file
             comp = dict(zlib=True, complevel=8)
@@ -618,6 +638,8 @@ class NetCDFSaver:
             # Add geographic data (always present)
             data_vars["landsea"] = (["x", "y"], mod_geo['landsea'])
             data_vars["vza"] = (["x", "y"], mod_geo['vza'])
+            if "sza" in mod_geo:
+                data_vars["SZA"] = (["x", "y"], mod_geo["sza"])
 
             data_vars["latitude"] = (["x", "y"], mod_geo['lat'])
             data_vars["longitude"] = (["x", "y"], mod_geo['lon'])
@@ -660,6 +682,10 @@ class NetCDFSaver:
                 ds["mod06_product"].attrs["units"] = "Unknown"
             ds["landsea"].attrs["units"] = "Unknown"
             ds["vza"].attrs["units"] = "degrees"
+            if "SZA" in ds:
+                ds["SZA"].attrs["long_name"] = "solar viewing zenith angle"
+                ds["SZA"].attrs["units"] = "degrees"
+                ds["SZA"].attrs["coordinates"] = "Latitude Longitude pixel_time"
 
             # Save to NetCDF file
             comp = dict(zlib=True, complevel=4)

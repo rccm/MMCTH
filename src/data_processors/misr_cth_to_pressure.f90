@@ -44,19 +44,24 @@ subroutine height_to_log_pressure(geo_height, misr_cth, rows, cols, pressure_at_
     do i = 1, rows
         do j = 1, cols
             ! Skip invalid misr_cth values
-            if (misr_cth(i, j) < 0) cycle
+            if (misr_cth(i, j) < -0.5 .or. misr_cth(i, j) /= misr_cth(i, j)) cycle
             
             ! Find the interpolation levels for each pixel
             do k = 1, num_levels-1
-                if (misr_cth(i, j) <= geo_height(k, i, j) .and. misr_cth(i, j) >= geo_height(k+1, i, j)) then                
-                    h_below = geo_height(k, i, j)
-                    h_above = geo_height(k+1, i, j)
+                h_below = geo_height(k, i, j)
+                h_above = geo_height(k+1, i, j)
+                if (h_below /= h_below .or. h_above /= h_above) cycle
+                if (h_below <= -900.0 .or. h_above <= -900.0) cycle
+                if (abs(h_above - h_below) <= 1.0d-8) cycle
+
+                if (misr_cth(i, j) <= h_below .and. misr_cth(i, j) >= h_above) then                
                     p_below = log_press(k)
                     p_above = log_press(k+1)
                     
                     ! Perform linear interpolation
                     interp_log_p = p_below + (misr_cth(i, j) - h_below) * (p_above - p_below) / (h_above - h_below)
                     pressure_at_cth(i, j) = exp(interp_log_p)
+                    exit
                 end if
             end do
             

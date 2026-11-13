@@ -48,7 +48,7 @@ class XarraySaver:
             "name": "MM_CloudTopHeight",
             "units": "m",
             "dtype": "int16",
-            "valid_range": np.array([0, 20000], dtype=np.int16),
+            "valid_range": np.array([-500, 20000], dtype=np.int16),
             "long_name": "MODIS/MISR fusion cloud top height",
         },
         "ctp": {
@@ -72,19 +72,19 @@ class XarraySaver:
         "cflag": {
             "name": "MM_Flag",
             "dtype": "int8",
-            "flag_values": np.array([0, 1, 2, 3, 4, 5, 6, 7,8,9], dtype=np.int8),
-            "flag_meanings": (
-                "no_retrieval"
-                "MODIS_only"
-                "MISR_only"
-                "MISR_selected; MODIS CTH < MISR CTH"
-                "MISR_selected; likely one-layer; BT applied"
-                "MODIS_selected; likely multi-layer; BT applied"
-                "MISR_selected; MM attempted; likely one-layer; CO2-slicing applied"
-                "MODIS_selected; MM attempted likely multi-layer; CO2-slicing applied"
-                "MM_success_band_pair_36_35"
-                "MM_success_band_pair_35_33"
-            ),
+            "flag_values": np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=np.int8),
+            "flag_meanings": " ".join([
+                "no_retrieval",
+                "modis_only",
+                "misr_only",
+                "misr_selected_modis_cth_less_than_misr_cth",
+                "misr_selected_likely_one_layer_bt_applied",
+                "modis_selected_likely_multilayer_bt_applied",
+                "misr_selected_mm_attempted_likely_one_layer_co2_slicing_applied",
+                "modis_selected_mm_attempted_likely_multilayer_co2_slicing_applied",
+                "mm_success_band_pair_36_35",
+                "mm_success_band_pair_35_33",
+            ]),
             "long_name": "cloud classification and quality flag",
         },
         "ml_zscore": {
@@ -106,13 +106,13 @@ class XarraySaver:
             "name": "MM_MultilayerConfidenceFlag",
             "dtype": "int8",
             "flag_values": np.array([0, 1, 2, 3, 4], dtype=np.int8),
-            "flag_meanings": (
-                "not_evaluated"
-                "weak_or_no_multilayer_evidence"
-                "moderate_multilayer_evidence"
-                "strong_multilayer_evidence"
-                "very_strong_multilayer_evidence"
-            ),
+            "flag_meanings": " ".join([
+                "not_evaluated",
+                "weak_or_no_multilayer_evidence",
+                "moderate_multilayer_evidence",
+                "strong_multilayer_evidence",
+                "very_strong_multilayer_evidence",
+            ]),
             "long_name": (
                 "multilayer confidence flag based on MM and MISR cloud top height difference"
             ),
@@ -198,6 +198,46 @@ class XarraySaver:
             "dtype": "float32",
             "long_name": "MODIS cloud effective emissivity",
         },
+        "cth_mmcorrected": {
+            "name": "MODIS_CloudTopHeight_MMCorrected",
+            "units": "m",
+            "dtype": "int16",
+            "long_name": "MODIS cloud top height with accepted MM corrections",
+            "comment": (
+                "Original MODIS value unless both original and retrieved CTH/CTP are valid "
+                "and the existing MM pipeline accepted the retrieval (MM_Flag 8 or 9; "
+                "MM_FailureReason 0, 70, or 71). CTH and CTP are replaced together. "
+                "Accepted retrievals may include the pipeline's one-layer mode. "
+                "Missing original MODIS values remain missing."
+            ),
+        },
+        "ctp_mmcorrected": {
+            "name": "MODIS_CloudTopPressure_MMCorrected",
+            "units": "hPa",
+            "dtype": "float32",
+            "long_name": "MODIS cloud top pressure with accepted MM corrections",
+            "comment": (
+                "Original MODIS value unless both original and retrieved CTH/CTP are valid "
+                "and the existing MM pipeline accepted the retrieval (MM_Flag 8 or 9; "
+                "MM_FailureReason 0, 70, or 71). CTH and CTP are replaced together. "
+                "Accepted retrievals may include the pipeline's one-layer mode. "
+                "Missing original MODIS values remain missing."
+            ),
+        },
+        "emissivity_mmcorrected": {
+            "name": "MODIS_CloudEffectiveEmissivity_MMCorrected",
+            "units": "1",
+            "dtype": "float32",
+            "long_name": "MODIS cloud effective emissivity with accepted MM corrections",
+            "comment": (
+                "Original MODIS value unless original emissivity is valid and the existing "
+                "MM pipeline accepted a valid emissivity retrieval (MM_Flag 8 or 9; "
+                "MM_FailureReason 0; retrieved emissivity from 0.01 to 1.0). "
+                "Validity is independent of the CTH/CTP replacement mask; reasons 70 and 71 "
+                "retain original MODIS emissivity. Accepted retrievals may include the "
+                "pipeline's one-layer mode. Missing original MODIS values remain missing."
+            ),
+        },
         "opt": {
             "name": "MODIS_CloudOpticalDepth",
             "units": "1",
@@ -210,7 +250,7 @@ class XarraySaver:
             "long_name": "MODIS cloud top retrieval method",
         },
         "cmulti": {
-            "name": "MODIS_CloudMultiLayerFlag",
+            "name": "MODIS_CloudMultilayerFlag",
             "dtype": "int8",
             "long_name": "MODIS Cloud Multi Layer Identification From Shortwave Observations",
         },
@@ -226,6 +266,60 @@ class XarraySaver:
             "flag_meanings": "clear liquid_water_clouds ice_clouds undetermined_phase_clouds",
             "long_name": "MODIS cloud phase",
         },
+        "cloud_mask_1km": {
+            "name": "MODIS_CloudMask",
+            "dtype": "int8",
+            "valid_values": np.array([0, 1, 2, 3, 4], dtype=np.int8),
+            "flag_values": np.array([0, 1, 2, 3, 4], dtype=np.int8),
+            "flag_meanings": (
+                "confident_cloudy probably_cloudy probably_clear confident_clear "
+                "not_determined"
+            ),
+            "missing_value": np.array(5, dtype=np.int8),
+            "long_name": "Decoded MODIS 1 km cloud mask confidence class",
+            "description": (
+                "Decoded from MOD06_L2/MYD06_L2 Cloud_Mask_1km byte 0: "
+                "bit 0 indicates whether the mask was determined, and bits 1-2 "
+                "give the unobstructed-FOV confidence. Values: 0=confident cloudy, "
+                "1=probably cloudy, 2=probably clear, 3=confident clear, "
+                "4=not determined, "
+                "and 5=missing or undecodable."
+            ),
+            "comment": (
+                "Confidence is decoded only when the byte-0 determination bit is 1; "
+                "a nonmissing byte with determination bit 0 is output as 4."
+            ),
+            "source": (
+                "MOD06_L2/MYD06_L2 Cloud_Mask_1km byte 0 bits 0-2, "
+                "copied from MOD35_L2/MYD35_L2"
+            ),
+            "cloud_mask_decoder_version": (
+                "modis_cloud_mask_byte0_bit0_gate_native_bits1_2_v2"
+            ),
+        },
+        "snow_ice_mask": {
+            "name": "SnowIceMask",
+            "dtype": "int8",
+            "valid_values": np.array([0, 1, 2], dtype=np.int8),
+            "flag_values": np.array([0, 1, 2], dtype=np.int8),
+            "flag_meanings": (
+                "snow_or_ice_background no_snow_or_ice_background "
+                "no_result_or_missing"
+            ),
+            "missing_value": np.array(2, dtype=np.int8),
+            "long_name": "MODIS 1 km snow/ice background flag",
+            "description": (
+                "Derived from bit 5 of the MOD06_L2/MYD06_L2 "
+                "Cloud_Mask_1km first byte. Values: 0=snow/ice background, "
+                "1=no snow/ice background, 2=no result or missing."
+            ),
+            "comment": (
+                "Bit polarity follows the source cloud-mask convention (0=yes, 1=no). "
+                "This flag identifies the cloud-mask processing path and may not identify "
+                "snow or ice hidden by thick cloud."
+            ),
+            "source": "MOD06_L2/MYD06_L2 Cloud_Mask_1km byte 0 bit 5",
+        },
     }
 
     MISR_SCHEMA: Dict[str, Dict[str, Any]] = {
@@ -240,11 +334,18 @@ class XarraySaver:
             "units": "hPa",
             "dtype": "float32",
             "long_name": "MISR cloud top pressure converted from cloud top height",
+            "comment": (
+                "Converted from MISR cloud top height by log-pressure interpolation. "
+                "Near-surface heights outside the valid ERA5 pressure-level bracket "
+                "may be set to ERA5 surface pressure."
+            ),
         },
         "misrcth_qa": {
             "name": "MISR_CloudTopHeight_QI",
             "dtype": "int16",
-            "valid_range": np.array([0, 128], dtype=np.int16),
+            "valid_range": np.array([0, 100], dtype=np.int16),
+            "flag_values": np.array([128], dtype=np.int16),
+            "flag_meanings": "bad_data",
             "long_name": "MISR cloud top height quality indicator",
             "comment": "0 to 100 are quality scores; 128 indicates bad data",
         },
@@ -403,8 +504,8 @@ class XarraySaver:
             dtype=np.int32,
         )
 
-        self._swath_aux_names = {"Latitude", "Longitude", "row_time", "pixel_time", "VZA"}
-        self._era5_aux_names = {"ERA5_Latitude", "ERA5_Longitude"}
+        self._swath_aux_names = {"Latitude", "Longitude", "row_time", "pixel_time"}
+        self._era5_aux_names = {"ERA5_Latitude", "ERA5_Longitude", "ERA5_Time"}
 
     def save_mm(
         self,
@@ -418,6 +519,7 @@ class XarraySaver:
         global_attrs: Optional[Dict[str, Any]] = None,
         var_attrs: Optional[Dict[str, Dict[str, Any]]] = None,
         scene_time: Optional[datetime] = None,
+        era5_time: Optional[datetime] = None,
     ) -> None:
 
         for k in ("lat", "lon", "vza"):
@@ -427,6 +529,7 @@ class XarraySaver:
         lat = np.asarray(mm_geo["lat"])
         lon = np.asarray(mm_geo["lon"])
         vza = np.asarray(mm_geo["vza"])
+        sza = np.asarray(mm_geo["sza"]) if "sza" in mm_geo else None
 
         if lat.shape != lon.shape:
             raise ValueError("Latitude and Longitude shapes differ")
@@ -435,6 +538,8 @@ class XarraySaver:
 
         if vza.shape != (ny, nx):
             raise ValueError("VZA shape must match lat/lon")
+        if sza is not None and sza.shape != (ny, nx):
+            raise ValueError("SZA shape must match lat/lon")
 
         ds = xr.Dataset()
 
@@ -530,6 +635,11 @@ class XarraySaver:
         ds["Latitude"] = xr.DataArray(lat, dims=("cell_along_swath_1km", "cell_cross_swath_1km"))
         ds["Longitude"] = xr.DataArray(lon, dims=("cell_along_swath_1km", "cell_cross_swath_1km"))
         ds["VZA"] = xr.DataArray(vza, dims=("cell_along_swath_1km", "cell_cross_swath_1km"))
+        if sza is not None:
+            ds["SZA"] = xr.DataArray(
+                np.asarray(sza, dtype=np.float32),
+                dims=("cell_along_swath_1km", "cell_cross_swath_1km"),
+            )
 
         ds["Latitude"].attrs.update({
             "standard_name": "latitude",
@@ -545,10 +655,48 @@ class XarraySaver:
             "long_name": "sensor viewing zenith angle",
             "units": "degrees",
         })
+        if "SZA" in ds:
+            ds["SZA"].attrs.update({
+                "long_name": "solar viewing zenith angle",
+                "units": "degrees",
+            })
 
         enc_hints["Latitude"] = self._enc_from_dtype("Latitude", "float32")
         enc_hints["Longitude"] = self._enc_from_dtype("Longitude", "float32")
         enc_hints["VZA"] = self._enc_from_dtype("VZA", "float32")
+        if "SZA" in ds:
+            enc_hints["SZA"] = self._enc_from_dtype("SZA", "float32")
+
+        if "elevation" in mm_geo:
+            elevation = np.asarray(mm_geo["elevation"])
+            self._assert_shape_2d("elevation", elevation, (ny, nx))
+            ds["SurfaceElevation"] = xr.DataArray(
+                elevation,
+                dims=("cell_along_swath_1km", "cell_cross_swath_1km"),
+            )
+            ds["SurfaceElevation"].attrs.update({
+                "standard_name": "surface_altitude",
+                "long_name": "MOD03 terrain height",
+                "units": "m",
+            })
+            enc_hints["SurfaceElevation"] = self._enc_from_dtype("SurfaceElevation", "float32")
+
+        if "land_sea_mask" in mm_geo:
+            land_sea_mask = np.asarray(mm_geo["land_sea_mask"])
+            self._assert_shape_2d("land_sea_mask", land_sea_mask, (ny, nx))
+            ds["LandSeaMask"] = xr.DataArray(
+                land_sea_mask,
+                dims=("cell_along_swath_1km", "cell_cross_swath_1km"),
+            )
+            ds["LandSeaMask"].attrs.update({
+                "long_name": "MOD03 land/sea mask",
+                "flag_values": np.arange(8, dtype=np.int16),
+                "flag_meanings": (
+                    "shallow_ocean land coastline shallow_inland_water ephemeral_water "
+                    "deep_inland_water moderate_or_continental_ocean deep_ocean"
+                ),
+            })
+            enc_hints["LandSeaMask"] = self._enc_from_dtype("LandSeaMask", "int16")
 
         # MODIS variables
         if modis_variables:
@@ -668,6 +816,23 @@ class XarraySaver:
                 if name in ("ERA5_Latitude", "ERA5_Longitude"):
                     have_era5_latlon = True
 
+        # Optional scalar ERA5 time coordinate
+        if era5_time is not None and era5_variables:
+            if era5_time.tzinfo is None:
+                era5_time = era5_time.replace(tzinfo=timezone.utc)
+            else:
+                era5_time = era5_time.astimezone(timezone.utc)
+
+            epoch = datetime(2000, 1, 1, tzinfo=timezone.utc)
+            seconds_since_2000 = (era5_time - epoch).total_seconds()
+            ds["ERA5_Time"] = xr.DataArray(np.array(seconds_since_2000, dtype=np.float64))
+            ds["ERA5_Time"].attrs.update({
+                "standard_name": "time",
+                "long_name": "ERA5 temporal interpolation target time",
+                "units": "seconds since 2000-01-01 00:00:00",
+                "calendar": "standard",
+            })
+
         # Optional scalar scene time coordinate
         if scene_time is not None:
             if scene_time.tzinfo is None:
@@ -700,6 +865,8 @@ class XarraySaver:
         if "MODIS_CloudTopHeight" in ds and "MODIS_CloudPhase" in ds:
             ds["MODIS_CloudTopHeight"].attrs.setdefault("ancillary_variables", "MODIS_CloudPhase")
 
+        self._validate_flag_metadata(ds)
+
         # Ensure _FillValue is only in encoding for data vars
         for v in ds.data_vars:
             ds[v].attrs.pop("_FillValue", None)
@@ -720,6 +887,9 @@ class XarraySaver:
             if cname not in encoding:
                 dt = str(ds.coords[cname].dtype)
                 encoding[cname] = {"dtype": dt, "_FillValue": None}
+
+        if "ERA5_Time" in ds.data_vars:
+            encoding["ERA5_Time"] = {"dtype": "float64", "_FillValue": None}
 
         # Range guard for integer data variable storage
         for name, da in ds.data_vars.items():
@@ -791,11 +961,45 @@ class XarraySaver:
                 if k not in ("dtype", "_FillValue")
             })
 
+    def _validate_flag_metadata(self, ds: xr.Dataset) -> None:
+        token_re = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+
+        for name, da in ds.data_vars.items():
+            if "flag_values" not in da.attrs:
+                continue
+
+            if "flag_meanings" not in da.attrs:
+                raise ValueError(f"{name}: flag_values requires flag_meanings")
+
+            meanings = da.attrs["flag_meanings"]
+            if not isinstance(meanings, str):
+                raise ValueError(f"{name}: flag_meanings must be a string")
+
+            normalized = " ".join(meanings.split())
+            if meanings != normalized:
+                raise ValueError(
+                    f"{name}: flag_meanings must use single spaces with no leading/trailing whitespace"
+                )
+
+            tokens = meanings.split(" ") if meanings else []
+            values = np.atleast_1d(da.attrs["flag_values"])
+
+            if len(tokens) != values.size:
+                raise ValueError(
+                    f"{name}: {values.size} flag_values but {len(tokens)} flag_meanings"
+                )
+
+            invalid = [token for token in tokens if not token_re.fullmatch(token)]
+            if invalid:
+                raise ValueError(f"{name}: invalid CF flag_meanings tokens: {invalid}")
+
     def _enc_from_dtype(self, name: str, dtype: str) -> Dict[str, Any]:
         dt = np.dtype(str(dtype))
 
         if np.issubdtype(dt, np.integer):
             lname = name.lower()
+            if lname == "modis_cloudmask":
+                return {"dtype": str(dtype), "fill": np.array(5, dtype=dt)}
             if "flag" in lname or "phase" in lname or "method" in lname or lname.endswith("_qi"):
                 fill = np.iinfo(dt).min
             else:
@@ -908,6 +1112,12 @@ class XarraySaver:
                 ds[v].attrs["coordinates"] = coord_string
 
     def _attach_era5_coordinates(self, ds: xr.Dataset, *, have_era5_latlon: bool) -> None:
+        time_name = None
+        if "ERA5_Time" in ds:
+            time_name = "ERA5_Time"
+        elif "time" in ds.coords:
+            time_name = "time"
+
         for v in ds.data_vars:
             if v in self._era5_aux_names:
                 continue
@@ -916,17 +1126,18 @@ class XarraySaver:
 
             if dims == ("era5_cell_along_swath_10km", "era5_cell_cross_swath_10km"):
                 parts = []
+                if time_name:
+                    parts.append(time_name)
                 if have_era5_latlon:
                     parts.extend(["ERA5_Latitude", "ERA5_Longitude"])
-                if "time" in ds.coords:
-                    parts.append("time")
                 if parts:
                     ds[v].attrs["coordinates"] = " ".join(parts)
 
             elif dims == ("z", "era5_cell_along_swath_10km", "era5_cell_cross_swath_10km"):
-                parts = ["z"]
+                parts = []
+                if time_name:
+                    parts.append(time_name)
+                parts.append("z")
                 if have_era5_latlon:
                     parts.extend(["ERA5_Latitude", "ERA5_Longitude"])
-                if "time" in ds.coords:
-                    parts.append("time")
                 ds[v].attrs["coordinates"] = " ".join(parts)

@@ -34,6 +34,8 @@ def sample_data():
             "lat": np.linspace(-40, 40, ny).reshape(ny, 1).repeat(nx, axis=1).astype(np.float32),
             "lon": np.linspace(-180, 180, nx).reshape(1, nx).repeat(ny, axis=0).astype(np.float32),
             "vza": rng.uniform(0, 90, size=(ny, nx)).astype(np.float32),
+            "sza": rng.uniform(0, 180, size=(ny, nx)).astype(np.float32),
+            "time2d": rng.uniform(7.0e8, 7.0e8 + 300, size=(ny, nx)).astype(np.float64),
         },
         # NOTE: The class expects MISR key 'misrcth'
         "misr_variables": {
@@ -50,7 +52,7 @@ def sample_data():
         # You can use either mapped keys (e.g., 'temperature_org') or final names (e.g., 'ERA5Temperature').
         "era5_variables": {
             "temperature_org":     rng.uniform(150, 350, size=(37, eyy, exx)).astype(np.float32),  # 3D
-            "surface_pressure":    rng.uniform(500, 1100, size=(37, eyy, exx)).astype(np.float32), # 3D
+            "surface_pressure":    rng.uniform(500, 1100, size=(eyy, exx)).astype(np.float32),     # 2D
             "geopotential_org":    rng.uniform(-5e4, 5e4, size=(37, eyy, exx)).astype(np.float32), # 3D
             "ERA5Humidity":        rng.uniform(0, 1, size=(eyy, exx)).astype(np.float32),          # 2D
         },
@@ -87,24 +89,29 @@ def test_save_mm(NetCDFSaverClass):
     )
 
     # Read back and sanity-check
-    ds = xr.open_dataset(filename)
+    ds = xr.open_dataset(filename, decode_coords=False)
 
     # existence
-    assert "MMCloudTopHeight" in ds, "MMCloudTopHeight not saved"
+    assert "MM_CloudTopHeight" in ds, "MM_CloudTopHeight not saved"
     assert "Latitude" in ds, "Latitude not saved"
     assert "Longitude" in ds, "Longitude not saved"
+    assert "SZA" in ds, "SZA not saved"
 
     # shapes for MM plane (must match lat/lon)
-    assert ds["MMCloudTopHeight"].shape == (ny, nx), "Incorrect MMCloudTopHeight shape"
+    assert ds["MM_CloudTopHeight"].shape == (ny, nx), "Incorrect MM_CloudTopHeight shape"
     assert ds["Latitude"].shape == (ny, nx), "Incorrect Latitude shape"
     assert ds["Longitude"].shape == (ny, nx), "Incorrect Longitude shape"
+    assert ds["SZA"].shape == (ny, nx), "Incorrect SZA shape"
+    assert ds["SZA"].attrs["long_name"] == "solar viewing zenith angle", "Incorrect SZA long_name"
+    assert ds["SZA"].attrs["units"] == "degrees", "Incorrect SZA units"
+    assert ds["SZA"].attrs["coordinates"] == "Latitude Longitude pixel_time", "Incorrect SZA coordinates"
 
     # ERA5 3D: check z length and first/last values
-    assert "ERA5Temperature" in ds, "ERA5Temperature not saved"
+    assert "ERA5_Temperature" in ds, "ERA5_Temperature not saved"
     zcoord = ds.coords.get("z", None)
     assert zcoord is not None, "z coord missing for ERA5 3D variables"
     assert zcoord.size == 37, "ERA5 z must have 37 pressure levels"
-    assert int(zcoord.values[0]) == 1 and int(zcoord.values[-1]) == 1000, "ERA5 z levels unexpected"
+    assert int(zcoord.values[0]) == 1000 and int(zcoord.values[-1]) == 1, "ERA5 z levels unexpected"
 
     ds.close()
     print("✅ basic round-trip checks passed:", filename)

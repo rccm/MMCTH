@@ -5,18 +5,49 @@ from pyhdf.VS import *
 import numpy as np
 import re
 import os
+import logging
+import time
 from datetime import datetime,timezone, timedelta 
+
+
+_LOG = logging.getLogger(__name__)
+
+
+def _open_sd_with_retry(path, mode=SDC.READ, attempts=4, base_delay_seconds=0.5):
+    """Open an HDF4 SD file, retrying short-lived filesystem/HDF failures."""
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return SD(path, mode)
+        except Exception as exc:
+            last_error = exc
+            if attempt == attempts:
+                break
+            delay = base_delay_seconds * attempt
+            _LOG.warning(
+                "HDF4 open failed for %s (attempt %d/%d: %s); retrying in %.2f s",
+                path,
+                attempt,
+                attempts,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
+    raise OSError(
+        f"HDF4 open failed after {attempts} attempts: {path}: {last_error}"
+    ) from last_error
 
 
 class MODL1Granule():
     def __init__(self, mod_l1b_fullpath,destripe_flag=True):
         self.fullpath = mod_l1b_fullpath  # Use the passed full path
         self.destripe_flag = destripe_flag
-        if os.path.isfile(self.fullpath):
-            self.hdf_file = SD(self.fullpath)
-        else:
-            print(f'Corrupted file: {self.fullpath}')    
-            raise FileNotFoundError("File not found: " + self.fullpath)
+        self.hdf_file = _open_sd_with_retry(self.fullpath)
+
+    def close(self):
+        if getattr(self, "hdf_file", None) is not None:
+            self.hdf_file.end()
+            self.hdf_file = None
     def get_id(self):
         match = re.search(r"\.A(\d{7})\.(\d{4})\.", self.fullpath)  # Use self.fullpath to extract date/time
         if match:
@@ -83,14 +114,16 @@ class MODL1Granule():
     
     
     def get_earth_sun_dist(self):
-        file_ = SD(self.fullpath)
-        earthsundist = getattr(file_, 'Earth-Sun Distance')
-        file_.end()
+        file_ = _open_sd_with_retry(self.fullpath)
+        try:
+            earthsundist = getattr(file_, 'Earth-Sun Distance')
+        finally:
+            file_.end()
 
         return earthsundist
 
     def get_data(self, fieldname, SD_field_rawData):
-        hdf_file = SD(self.fullpath)
+        hdf_file = _open_sd_with_retry(self.fullpath)
         if SD_field_rawData==0:
             data = hdf_file #science data set
         elif SD_field_rawData==1:
@@ -367,11 +400,21 @@ class MODL1Granule():
         Raises:
         - ValueError: If the band name is not found or if an invalid data type is specified.
         """
-        hdf_file = SD(self.fullpath, SDC.READ)        
+        hdf_file = self.hdf_file
         emissive_dataset = hdf_file.select('EV_1KM_Emissive')
         refsb_dataset = hdf_file.select('EV_1KM_RefSB')
         refsb_dataset_250m = hdf_file.select('EV_250_Aggr1km_RefSB')
         refsb_dataset_500m = hdf_file.select('EV_500_Aggr1km_RefSB')
+
+        def finish(value):
+            for dataset in (
+                emissive_dataset,
+                refsb_dataset,
+                refsb_dataset_250m,
+                refsb_dataset_500m,
+            ):
+                dataset.endaccess()
+            return value
 
         emissive_band_names = emissive_dataset.attributes()['band_names'].split(',')
         refsb_band_names = refsb_dataset.attributes()['band_names'].split(',')
@@ -395,9 +438,9 @@ class MODL1Granule():
             # Scale the data using the appropriate scales and offsets
             if scale_flag:
                 band_data = (band_data - offsets[band_index]) * scales[band_index]
-                return band_data
+                return finish(band_data)
             else:
-                return band_data
+                return finish(band_data)
         elif band_name in refsb_band_names:
             dataset = refsb_dataset
             band_names = refsb_band_names
@@ -447,9 +490,9 @@ class MODL1Granule():
         # Scale the data using the appropriate scales and offsets
         if scale_flag:
             band_data = (band_data - offsets[band_index]) * scales[band_index]
-            return band_data
+            return finish(band_data)
         else:
-            return band_data
+            return finish(band_data)
     
     def get_BT(self, band_name, units=1, satellite='TERRA'):
         """
@@ -556,6 +599,129 @@ class MODL1Granule():
 class MOD06Granule():
     def __init__(self, mod_l1b_fullpath):
         self.fullpath = mod_l1b_fullpath  # Use the passed full path
+
+    @staticmethod
+    def _filled_cloud_mask_class(shape: tuple[int, int] | None) -> np.ndarray:
+        if shape is None:
+            shape = (0, 0)
+        return np.full(shape, 5, dtype=np.int8)
+
+    @staticmethod
+    def _filled_snow_ice_mask(shape: tuple[int, int] | None) -> np.ndarray:
+        if shape is None:
+            shape = (0, 0)
+        return np.full(shape, 2, dtype=np.int8)
+
+    @staticmethod
+    def _cloud_mask_byte_axis(mask: np.ndarray, dimensions: dict, target_shape: tuple[int, int] | None) -> int | None:
+        dim_items = list((dimensions or {}).items())
+        if len(dim_items) == mask.ndim:
+            for axis, (name, size) in enumerate(dim_items):
+                lname = str(name).lower()
+                if ("byte" in lname or "num_bytes" in lname) and int(size) == mask.shape[axis]:
+                    return axis
+
+        candidates = [axis for axis, size in enumerate(mask.shape) if 1 <= size <= 10]
+        if target_shape is not None:
+            target_shape = tuple(int(v) for v in target_shape)
+            for axis in candidates:
+                remaining_shape = tuple(mask.shape[i] for i in range(mask.ndim) if i != axis)
+                if remaining_shape == target_shape:
+                    return axis
+
+        if mask.shape[-1] <= 10:
+            return mask.ndim - 1
+        if mask.shape[0] <= 10:
+            return 0
+        return candidates[0] if candidates else None
+
+    @staticmethod
+    def _decode_cloud_mask_first_byte(first_byte, *, fill_value=None, source_missing=None) -> np.ndarray:
+        """Decode the determination flag and cloud confidence from byte 0.
+
+        MODIS byte 0 uses bit 0 as the cloud-mask determination flag and
+        bits 1--2 as the unobstructed-FOV confidence.  Keep the native
+        confidence values 0--3, use 4 when the mask was not determined, and
+        reserve 5 for source-missing or undecodable pixels.
+        """
+        data = first_byte
+        missing = np.zeros(np.shape(data), dtype=bool)
+
+        if np.ma.isMaskedArray(data):
+            missing |= np.ma.getmaskarray(data)
+            data = data.filled(fill_value if fill_value is not None else 0)
+
+        data = np.asarray(data)
+        if source_missing is not None:
+            missing |= np.asarray(source_missing, dtype=bool)
+
+        # Cloud_Mask_1km is a packed bit field.  MOD06 declares raw value 0
+        # as _FillValue, but that same byte is also the valid packed encoding
+        # for a nonmissing, not-determined cloud mask.  Missingness therefore
+        # must come from an explicit mask/source_missing/nonfinite value, not
+        # equality with the packed _FillValue.
+
+        if np.issubdtype(data.dtype, np.floating):
+            finite = np.isfinite(data)
+            missing |= ~finite
+            safe = np.where(finite, data, 0).astype(np.int64, copy=False)
+            first_u8 = (safe & 0xFF).astype(np.uint8, copy=False)
+        elif np.issubdtype(data.dtype, np.signedinteger) and data.dtype.itemsize == 1:
+            first_u8 = data.astype(np.int8, copy=False).view(np.uint8)
+        elif np.issubdtype(data.dtype, np.integer):
+            first_u8 = (data.astype(np.int64, copy=False) & 0xFF).astype(np.uint8, copy=False)
+        else:
+            return np.full(data.shape, 5, dtype=np.int8)
+
+        determined = np.bitwise_and(first_u8, np.uint8(1)) == 1
+        cloud_bits = np.bitwise_and(
+            np.right_shift(first_u8, np.uint8(1)),
+            np.uint8(3),
+        )
+        decoded = np.full(first_u8.shape, 5, dtype=np.int8)
+        not_determined = ~missing & ~determined
+        valid = ~missing & determined
+        decoded[not_determined] = 4
+        decoded[valid] = cloud_bits[valid].astype(np.int8, copy=False)
+        return decoded
+
+    @staticmethod
+    def _decode_snow_ice_first_byte(first_byte, *, fill_value=None, source_missing=None) -> np.ndarray:
+        """Decode Cloud_Mask_1km byte-0 bit 5 (0=snow/ice, 1=no snow/ice)."""
+        data = first_byte
+        missing = np.zeros(np.shape(data), dtype=bool)
+
+        if np.ma.isMaskedArray(data):
+            missing |= np.ma.getmaskarray(data)
+            data = data.filled(fill_value if fill_value is not None else 0)
+
+        data = np.asarray(data)
+        if source_missing is not None:
+            missing |= np.asarray(source_missing, dtype=bool)
+
+        # See _decode_cloud_mask_first_byte: a packed raw byte equal to the
+        # MOD06 _FillValue is not sufficient evidence that this flag pixel is
+        # missing.
+
+        if np.issubdtype(data.dtype, np.floating):
+            finite = np.isfinite(data)
+            missing |= ~finite
+            safe = np.where(finite, data, 0).astype(np.int64, copy=False)
+            first_u8 = (safe & 0xFF).astype(np.uint8, copy=False)
+        elif np.issubdtype(data.dtype, np.signedinteger) and data.dtype.itemsize == 1:
+            first_u8 = data.astype(np.int8, copy=False).view(np.uint8)
+        elif np.issubdtype(data.dtype, np.integer):
+            first_u8 = (data.astype(np.int64, copy=False) & 0xFF).astype(np.uint8, copy=False)
+        else:
+            return np.full(data.shape, 2, dtype=np.int8)
+
+        determined = np.bitwise_and(first_u8, np.uint8(1)) == 1
+        snow_ice = ((first_u8 >> np.uint8(5)) & np.uint8(1)).astype(np.int8)
+        decoded = np.full(first_u8.shape, 2, dtype=np.int8)
+        valid = ~missing & determined
+        decoded[valid] = snow_ice[valid]
+        return decoded
+
     @staticmethod
     def _fit_to_target(arr: np.ndarray, target_shape: tuple[int, int], pad_mode: str = "edge") -> np.ndarray:
         """Center-crop or pad (edge) to match target_shape = (rows, cols)."""
@@ -597,12 +763,18 @@ class MOD06Granule():
         Cell_*_Swath_Sampling, crop to its exact 1 km window, and (optionally)
         fit to a caller-provided target grid.
         """
-        hdf_file = SD(self.fullpath)
-        sds = hdf_file.select(fieldname)
-        attrs = sds.attributes()
+        hdf_file = _open_sd_with_retry(self.fullpath)
+        sds = None
+        try:
+            sds = hdf_file.select(fieldname)
+            attrs = sds.attributes()
 
-        # ---- read ----
-        data_value = sds.get()
+            # ---- read ----
+            data_value = sds.get()
+        finally:
+            if sds is not None:
+                sds.endaccess()
+            hdf_file.end()
 
         # ---- scale / mask (if requested) ----
         if scale_factor_flag:
@@ -668,6 +840,113 @@ class MOD06Granule():
 
     def get_multi(self):
         return self.get_data('Cloud_Multi_Layer_Flag')
+
+    def get_cloud_mask_class(self, target_shape: tuple[int, int] | None = None):
+        """
+        Decode MOD06/MYD06 Cloud_Mask_1km first-byte cloudiness confidence.
+
+        Output values are:
+          0 confident cloudy, 1 probably cloudy, 2 probably clear,
+          3 confident clear,
+          4 not determined, 5 missing/cannot decode.
+        """
+        hdf_file = None
+        try:
+            hdf_file = _open_sd_with_retry(self.fullpath)
+            sds = hdf_file.select("Cloud_Mask_1km")
+            attrs = sds.attributes()
+            dimensions = sds.dimensions()
+            raw_mask = sds.get()
+        except Exception:
+            return self._filled_cloud_mask_class(target_shape)
+        finally:
+            if hdf_file is not None:
+                hdf_file.end()
+
+        if np.ma.isMaskedArray(raw_mask):
+            raw_missing = np.ma.getmaskarray(raw_mask)
+        else:
+            raw_missing = None
+
+        raw_mask = np.asanyarray(raw_mask)
+        if raw_mask.ndim != 3:
+            return self._filled_cloud_mask_class(target_shape)
+
+        byte_axis = self._cloud_mask_byte_axis(raw_mask, dimensions, target_shape)
+        if byte_axis is None or raw_mask.shape[byte_axis] < 1:
+            return self._filled_cloud_mask_class(target_shape)
+
+        first_byte = np.moveaxis(raw_mask, byte_axis, -1)[..., 0]
+        source_missing = None
+        if raw_missing is not None:
+            source_missing = np.moveaxis(raw_missing, byte_axis, -1)[..., 0]
+
+        if target_shape is not None and first_byte.shape != tuple(target_shape):
+            if first_byte.T.shape == tuple(target_shape):
+                first_byte = first_byte.T
+                if source_missing is not None:
+                    source_missing = source_missing.T
+            else:
+                return self._filled_cloud_mask_class(target_shape)
+
+        return self._decode_cloud_mask_first_byte(
+            first_byte,
+            fill_value=attrs.get("_FillValue"),
+            source_missing=source_missing,
+        )
+
+    def get_snow_ice_mask(self, target_shape: tuple[int, int] | None = None):
+        """
+        Decode the MOD06/MYD06 Cloud_Mask_1km snow/ice background flag.
+
+        Output values follow the source bit-5 convention:
+          0 snow/ice background, 1 no snow/ice background,
+          2 no result/missing/cannot decode.
+        """
+        hdf_file = None
+        try:
+            hdf_file = _open_sd_with_retry(self.fullpath)
+            sds = hdf_file.select("Cloud_Mask_1km")
+            attrs = sds.attributes()
+            dimensions = sds.dimensions()
+            raw_mask = sds.get()
+        except Exception:
+            return self._filled_snow_ice_mask(target_shape)
+        finally:
+            if hdf_file is not None:
+                hdf_file.end()
+
+        if np.ma.isMaskedArray(raw_mask):
+            raw_missing = np.ma.getmaskarray(raw_mask)
+        else:
+            raw_missing = None
+
+        raw_mask = np.asanyarray(raw_mask)
+        if raw_mask.ndim != 3:
+            return self._filled_snow_ice_mask(target_shape)
+
+        byte_axis = self._cloud_mask_byte_axis(raw_mask, dimensions, target_shape)
+        if byte_axis is None or raw_mask.shape[byte_axis] < 1:
+            return self._filled_snow_ice_mask(target_shape)
+
+        first_byte = np.moveaxis(raw_mask, byte_axis, -1)[..., 0]
+        source_missing = None
+        if raw_missing is not None:
+            source_missing = np.moveaxis(raw_missing, byte_axis, -1)[..., 0]
+
+        if target_shape is not None and first_byte.shape != tuple(target_shape):
+            if first_byte.T.shape == tuple(target_shape):
+                first_byte = first_byte.T
+                if source_missing is not None:
+                    source_missing = source_missing.T
+            else:
+                return self._filled_snow_ice_mask(target_shape)
+
+        return self._decode_snow_ice_first_byte(
+            first_byte,
+            fill_value=attrs.get("_FillValue"),
+            source_missing=source_missing,
+        )
     
     def get_qa(self):
         """
@@ -678,7 +957,7 @@ class MOD06Granule():
         np.ndarray
             Shape (ny, nx, 9), dtype int8.
         """
-        hdf_file = SD(self.fullpath, SDC.READ)
+        hdf_file = _open_sd_with_retry(self.fullpath)
         try:
             sds = hdf_file.select("Quality_Assurance_1km")
             qa = sds.get()  # raw packed bytes
@@ -776,7 +1055,7 @@ class MOD03Granule:
         self._cache = {}
 
     def get_data(self, fieldname, scale_factor_flag=True):
-        hdf_file = SD(self.fullpath, SDC.READ)
+        hdf_file = _open_sd_with_retry(self.fullpath)
         try:
             data = hdf_file.select(fieldname)
             data_value = data.get()
@@ -790,14 +1069,18 @@ class MOD03Granule:
             hdf_file.end()
 
     def list_sds_names(self):
-        hdf_file = SD(self.fullpath, SDC.READ)
+        hdf_file = _open_sd_with_retry(self.fullpath)
         try:
             return list(hdf_file.datasets().keys())
         finally:
             hdf_file.end()
 
     def get_sza(self):
-        return self.get_data("SolarZenith")
+        if "SolarZenith" not in self._cache:
+            sza = np.asarray(self.get_data("SolarZenith"), dtype=np.float32)
+            sza[(~np.isfinite(sza)) | (sza < 0.0) | (sza > 180.0)] = np.nan
+            self._cache["SolarZenith"] = sza
+        return self._cache["SolarZenith"]
 
     def get_saa(self):
         return self.get_data("SolarAzimuth")
@@ -814,6 +1097,11 @@ class MOD03Granule:
     def get_lon(self):
         return self.get_data("Longitude", scale_factor_flag=False)
 
+    def get_height(self):
+        if "Height" not in self._cache:
+            self._cache["Height"] = self.get_data("Height")
+        return self._cache["Height"]
+
     def get_landsea_mask(self, binary_output=True):
         """
         0: Shallow ocean
@@ -825,12 +1113,14 @@ class MOD03Granule:
         6: Moderate or continental ocean
         7: Deep ocean
         """
-        landsea_mask = self.get_data("Land/SeaMask", scale_factor_flag=False)
+        if "Land/SeaMask" not in self._cache:
+            self._cache["Land/SeaMask"] = self.get_data("Land/SeaMask", scale_factor_flag=False)
+        landsea_mask = self._cache["Land/SeaMask"]
 
         if binary_output:
             binary_mask = np.zeros_like(landsea_mask, dtype=int)
             binary_mask[landsea_mask == 1] = 1
-            binary_mask[landsea_mask == 2] = 2
+            binary_mask[landsea_mask == 2] = 1
             return binary_mask
 
         return landsea_mask
@@ -1055,4 +1345,4 @@ class MOD03Granule:
             t_scan_native = self.get_ev_start_time()
 
         t_scan_2000 = self._native_mod03_to_seconds_since_2000(t_scan_native)
-        return np.repeat(t_scan_2000, 10) 
+        return np.repeat(t_scan_2000, 10)

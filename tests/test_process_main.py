@@ -49,6 +49,15 @@ if __name__ == "__main__":
                                         '/data/gdi/e/ERA5//multi/era5_profile_2019_07_06.nc', \
                                             '/data/gdi/e/ERA5/single/era5_single_2019_07_07.nc', \
                                                 '/data/gdi/e/ERA5/multi/era5_profile_2019_07_07.nc']
+    inputfiles = ['/data/gdi/satellite/TerraDataArchive/MODIS/MOD021KM/2015/021/MOD021KM.A2015021.0850.061.2017318200039.hdf', \
+             '/data/gdi/d/MOD06/2015/021/MOD06_L2.A2015021.0850.061.2017319045052.hdf', \
+             '/data/gdi/satellite/TerraDataArchive/MODIS/MOD03/2015/021/MOD03.A2015021.0850.061.2017318195335.hdf', \
+             '/data/gdi/e/MISR/TCCloud/2015.01.21/MISR_AM1_TC_CLOUD_P176_O080283_F01_0001.hdf', \
+             '/data/gdi/e/MISR/AGP/MISR_AM1_AGP_P176_F01_24.hdf', \
+             '/data/gdi/e/ERA5//single/era5_single_2015_01_21.nc', \
+             '/data/gdi/e/ERA5//multi/era5_profile_2015_01_21.nc', \
+             '/data/gdi/e/ERA5/single/era5_single_2015_01_22.nc', \
+             '/data/gdi/e/ERA5/multi/era5_profile_2015_01_22.nc']
     # inputfiles = ['/data/gdi/satellite/TerraDataArchive/MODIS/MOD021KM/2015/144/MOD021KM.A2015144.1140.061.2017320181302.hdf', '/data/gdi/d/MOD06/2015/144/MOD06_L2.A2015144.1140.061.2017321025424.hdf', '/data/gdi/satellite/TerraDataArchive/MODIS/MOD03/2015/144/MOD03.A2015144.1140.061.2017320173030.hdf', '/data/gdi/e/MISR/TCCloud/2015.05.24/MISR_AM1_TC_CLOUD_P205_O082076_F01_0001.hdf', '/data/gdi/e/MISR/AGP/MISR_AM1_AGP_P205_F01_24.hdf', '/data/gdi/e/ERA5//single/era5_single_2015_05_24.nc', '/data/gdi/e/ERA5//multi/era5_profile_2015_05_24.nc', '/data/gdi/e/ERA5/single/era5_single_2015_05_25.nc', '/data/gdi/e/ERA5/multi/era5_profile_2015_05_25.nc']
     # inputfiles = ['/data/gdi/satellite/TerraDataArchive/MODIS/MOD021KM/2015/347/MOD021KM.A2015347.2310.061.2017323105434.hdf', '/data/gdi/d/MOD06/2015/347/MOD06_L2.A2015347.2310.061.2017324012417.hdf', '/data/gdi/satellite/TerraDataArchive/MODIS/MOD03/2015/347/MOD03.A2015347.2310.061.2017323063532.hdf', '/data/gdi/e/MISR/TCCloud/2015.12.13/MISR_AM1_TC_CLOUD_P081_O085039_F01_0001.hdf', '/data/gdi/e/MISR/AGP/MISR_AM1_AGP_P081_F01_24.hdf', \
     #                '/data/gdi/e/ERA5//single/era5_single_2015_12_13.nc', '/data/gdi/e/ERA5//multi/era5_profile_2015_12_13.nc',\

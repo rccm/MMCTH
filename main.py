@@ -53,6 +53,12 @@ PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.append(str(PROJECT_DIR / "src"))
 
 from src.misc import fetch_methods
+from src.misc.run_status import (
+    RunStatusWriter,
+    expected_output_path,
+    make_run_id,
+    work_item_record,
+)
 from src.data_processors.process_main import MainProcessor
 
 # ---------------------------------------------------------------------
@@ -211,6 +217,7 @@ def fetch_and_process_group(
     orbit_number,
     output_dir: str,
     destripe_flag: bool = True,
+    save_flag: str = "not_debug",
 ):
     mod06_file = inputfile_list[1]
     tccloud_file = inputfile_list[3]
@@ -225,6 +232,11 @@ def fetch_and_process_group(
 
     start = time.time()
     proc = None
+    expected_output = expected_output_path(inputfile_list, orbit_number, output_dir)
+    before_signature = None
+    if expected_output and os.path.exists(expected_output):
+        stat = os.stat(expected_output)
+        before_signature = (stat.st_mtime_ns, stat.st_size)
 
     try:
         try:
@@ -238,12 +250,47 @@ def fetch_and_process_group(
         except TypeError:
             proc = proc_cls(inputfile_list, logger=None, output_dir=output_dir)
 
-        proc.run_process(save_flag="not_debug")
+        proc.run_process(save_flag=save_flag)
 
-        log.info(
-            "[rank %d] Finished job for orbit %s in %.1f s",
-            rank, orbit_number, time.time() - start
-        )
+        after_signature = None
+        if expected_output and os.path.exists(expected_output):
+            stat = os.stat(expected_output)
+            after_signature = (stat.st_mtime_ns, stat.st_size)
+
+        if after_signature is not None and after_signature != before_signature:
+            status = "SAVED"
+            message = "output created or replaced"
+            log.info(
+                "[rank %d] Saved job for orbit %s in %.1f s",
+                rank,
+                orbit_number,
+                time.time() - start,
+            )
+        elif getattr(proc.mm_processor, "last_status", None) == "SKIPPED_NO_OVERLAP":
+            status = "SKIPPED_NO_OVERLAP"
+            message = getattr(proc.mm_processor, "last_error", "no spatial overlap")
+            log.info(
+                "[rank %d] Skipped non-overlapping candidate for orbit %s in %.1f s",
+                rank,
+                orbit_number,
+                time.time() - start,
+            )
+        else:
+            status = "FAILED_NO_OUTPUT"
+            message = getattr(proc.mm_processor, "last_error", "no output was written")
+            log.error(
+                "[rank %d] Processing returned without replacing %s: %s",
+                rank,
+                expected_output,
+                message,
+            )
+
+        return {
+            "status": status,
+            "message": message,
+            "output_path": expected_output,
+            "elapsed_seconds": round(time.time() - start, 3),
+        }
 
     finally:
         if proc is not None and hasattr(proc, "close"):
@@ -255,33 +302,77 @@ def fetch_and_process_group(
         del proc
         gc.collect()
 
-def process_work_items(work_items, output_dir: str, destripe_flag: bool = True):
+def process_work_items(
+    work_items,
+    output_dir: str,
+    destripe_flag: bool = True,
+    save_flag: str = "not_debug",
+    run_id: str | None = None,
+):
     """
     Process a flat list of (gid, files, orbit_number) on the current rank.
     """
     log.info("Rank %d received %d work items", rank, len(work_items))
+    status_writer = RunStatusWriter(output_dir, run_id or "unknown_run", rank)
+    status_writer.write_plan(work_items, output_dir)
+    if rank == 0:
+        log.info("Run status directory: %s", status_writer.run_dir)
 
-    for gid, files, orbit_number in work_items:
-        log.debug("Rank %d processing gid=%s orbit=%s", rank, gid, orbit_number)
-        print(f"Rank {rank} is processing group {gid} with orbit {orbit_number}", flush=True)
-        print(f"Files: {files}", flush=True)
+    try:
+        for gid, files, orbit_number in work_items:
+            base_record = work_item_record(
+                gid,
+                files,
+                orbit_number,
+                output_dir,
+                check_input_exists=False,
+            )
+            status_writer.event(base_record, "STARTED")
+            log.debug("Rank %d processing gid=%s orbit=%s", rank, gid, orbit_number)
+            print(f"Rank {rank} is processing group {gid} with orbit {orbit_number}", flush=True)
+            print(f"Files: {files}", flush=True)
 
-        try:
-            fetch_and_process_group(files, orbit_number, output_dir, destripe_flag)
-        except ValueError as e:
-            log.warning(
-                "Non-fatal: gid=%s skipped (%s) orbit=%s files=%s",
-                gid, e, orbit_number, files
-            )
-            continue
-        except Exception:
-            mod021km = os.path.basename(files[0]) if len(files) > 0 else "NA"
-            misr_tc = os.path.basename(files[3]) if len(files) > 3 else "NA"
-            log.exception(
-                "FAILED gid=%s orbit=%s modis=%s misr_tc=%s files=%s",
-                gid, orbit_number, mod021km, misr_tc, files
-            )
-            continue
+            try:
+                outcome = fetch_and_process_group(
+                    files,
+                    orbit_number,
+                    output_dir,
+                    destripe_flag,
+                    save_flag,
+                )
+                status_writer.event(
+                    base_record,
+                    outcome["status"],
+                    message=outcome["message"],
+                    output_path=outcome["output_path"],
+                    elapsed_seconds=outcome["elapsed_seconds"],
+                )
+            except ValueError as e:
+                status_writer.event(
+                    base_record,
+                    "SKIPPED_VALUE_ERROR",
+                    message=str(e),
+                )
+                log.warning(
+                    "Non-fatal: gid=%s skipped (%s) orbit=%s files=%s",
+                    gid, e, orbit_number, files
+                )
+                continue
+            except Exception as exc:
+                status_writer.event(
+                    base_record,
+                    "FAILED_EXCEPTION",
+                    message=f"{type(exc).__name__}: {exc}",
+                )
+                mod021km = os.path.basename(files[0]) if len(files) > 0 else "NA"
+                misr_tc = os.path.basename(files[3]) if len(files) > 3 else "NA"
+                log.exception(
+                    "FAILED gid=%s orbit=%s modis=%s misr_tc=%s files=%s",
+                    gid, orbit_number, mod021km, misr_tc, files
+                )
+                continue
+    finally:
+        status_writer.close()
 
 
 # ---------------------------------------------------------------------
@@ -300,6 +391,11 @@ def main() -> None:
     p.add_argument("-i", "--modisid", type=str)
     p.add_argument("--modisid-file", type=str, help="Text file with one MODIS ID per line")
     p.add_argument("--debug", action="store_true", help="enable debug logging")
+    p.add_argument(
+        "--co2-debug",
+        action="store_true",
+        help="write CO2 failure diagnostic NetCDF files under output-dir/debug",
+    )
     p.add_argument("--quiet", action="store_true", help="only warnings and errors")
     destripe_group = p.add_mutually_exclusive_group()
     destripe_group.add_argument(
@@ -333,6 +429,9 @@ def main() -> None:
     elif args.quiet:
         level = logging.WARNING
     logging.getLogger().setLevel(level)
+    save_flag = "co2_debug" if args.co2_debug else "not_debug"
+    run_id = make_run_id() if rank == 0 else None
+    run_id = comm.bcast(run_id, root=0)
 
     # -----------------------------------------------------------------
     # Fast parallel path for --modisid-file
@@ -365,7 +464,13 @@ def main() -> None:
         my_work_items = build_work_items(my_groups, my_orbit_info)
         log.info("Rank %d built %d work items from its MODIS IDs", rank, len(my_work_items))
 
-        process_work_items(my_work_items, args.output_dir, args.destripe_flag)
+        process_work_items(
+            my_work_items,
+            args.output_dir,
+            args.destripe_flag,
+            save_flag,
+            run_id,
+        )
         log.info("[rank %d] Finished all assigned work; entering final barrier", rank)
         comm.Barrier()
         log.info("[rank %d] All ranks reached final barrier; exiting cleanly", rank)
@@ -447,7 +552,13 @@ def main() -> None:
         sys.exit(1)
 
     my_chunk = comm.scatter(work_chunks, root=0)
-    process_work_items(my_chunk, args.output_dir, args.destripe_flag)
+    process_work_items(
+        my_chunk,
+        args.output_dir,
+        args.destripe_flag,
+        save_flag,
+        run_id,
+    )
     log.info("[rank %d] Finished all assigned work; entering final barrier", rank)
     comm.Barrier()
     log.info("[rank %d] All ranks reached final barrier; exiting cleanly", rank)

@@ -249,7 +249,7 @@ subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp,
 ! Local variables
   real :: tcold(nbct)  
   integer :: ltrp, isp, imisr, imslp, ll, k, id, lmin, lco2,jday
-  integer :: prof_end
+  integer :: prof_end, search_bottom, profile_bottom
   integer ::lwin, iw1 
   integer :: date2doy   
   integer :: nl                     ! Level where water/temperature profiles = 0
@@ -264,6 +264,7 @@ subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp,
   integer :: ctp_flag(nsct)                     ! Per-band-pair flag
   real :: ctp_pres(nsct)                        ! Temporary CTP storage
   real :: sfc_emis(ntbct)                       ! Surface emissivity
+  real :: lower_temp, lower_pres, lower_emis
   real :: ozprof(plev)                          ! Ozone profile (ppmv)
   real :: taup(plev,ntbct)                      ! Optical depth
   real :: freqemis(nb_wavelen), emis(nb_wavelen), rho(nb_wavelen)
@@ -272,6 +273,7 @@ subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp,
   integer :: met_year, met_month, met_day
   real :: tpad(plev), wpad(plev), ozpad(plev)
   integer            :: newunit, CO2_Slicing_Flag, kwc
+  integer :: lower_idx
   character(len=40)  :: fname
   logical ::ok, neg, start
   real ::  den, num, deltaI
@@ -428,7 +430,22 @@ subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp,
   dbg_imisr = imisr
   is1  = imisr - 1
 
-  prof_end = max(1, imisr - 1)
+  if (is_one_layer_call) then
+    search_bottom = isp
+  else
+    search_bottom = imisr
+  end if
+
+  profile_bottom = search_bottom
+  if (is_one_layer_call .and. search_bottom > 1) then
+    if ((.not. ieee_is_finite(tprof(search_bottom))) .or. tprof(search_bottom) <= 0.0 .or. &
+        (.not. ieee_is_finite(wprof(search_bottom))) .or. wprof(search_bottom) < 0.0 .or. &
+        (.not. ieee_is_finite(hprof(search_bottom)))) then
+      profile_bottom = search_bottom - 1
+    end if
+  end if
+
+  prof_end = max(1, profile_bottom)
   if (any(.not. ieee_is_finite(tprof(1:prof_end))) .or. any(tprof(1:prof_end) <= 0.0) .or. &
       any(.not. ieee_is_finite(wprof(1:prof_end))) .or. any(wprof(1:prof_end) < 0.0) .or. &
       any(.not. ieee_is_finite(hprof(1:prof_end)))) then
@@ -457,10 +474,10 @@ subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp,
 !       exit
 !     end if
 !   enddo
-! Tropopause level (coldest temperature or inflection point)
+  ! Tropopause level (coldest temperature or inflection point)
   tmin = 350.0
-  lmin = isp
-  do ll = 44, isp
+  lmin = profile_bottom
+  do ll = 44, profile_bottom
     if (tprof(ll) <= 0.0) cycle
     if (tprof(ll) <= tmin) then
       tmin = tprof(ll)
@@ -468,7 +485,7 @@ subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp,
     end if
   enddo
   ltrp = -99
-  do ll = lmin, min(71, isp-1)
+  do ll = lmin, min(71, profile_bottom-1)
     if (tprof(ll-1) >= tprof(ll) .and. tprof(ll+1) > tprof(ll)) then
       ltrp = ll
       exit
@@ -477,9 +494,7 @@ subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp,
   if (ltrp == -99) ltrp = lmin
   if (ltrp < 2) ltrp = 2  
   ptrp = pp(ltrp)
-  if (ltrp >= imisr) then
-    ! write(*,'(A,I3,A,F10.2,A)') 'ERROR: Tropopause level ', ltrp, &
-    !                             ' at ', ptrp, ' hPa below misr_ctp, returning badvalue'
+  if (search_bottom <= ltrp .or. search_bottom > plev) then
     Failure_Reason = mm_no_vertical_search
     dbg_failure_reason = Failure_Reason
     dbg_ltrp = ltrp
@@ -511,16 +526,28 @@ subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp,
   tpad   = tprof            ! copy original top → surface
   wpad   = wprof
   ozpad  = ozprof
-  tmisr  = tpad(imisr-1)      ! storing CTT for later usage 
+  tmisr  = tpad(imisr)        ! storing CTT for later usage
   !if (tmisr < 0) then
   !  tmisr = surftmp
   !endif
 
-  do ll = imisr-1, plev       ! layers that are physically below the terrain
-    tpad(ll)  = tmisr        ! hold at surface T
-    wpad(ll)  = 0.0        ! zero vapour → negligible extra τ
-    ozpad(ll) = 0.0
-  end do 
+  ! In one-layer reference mode, keep the original atmospheric profile above the
+  ! physical surface, and fill grid levels at/below the surface with the surface
+  ! boundary. In two-layer MM mode, replace the atmosphere at/below the MISR
+  ! lower-cloud boundary with an opaque lower-cloud boundary.
+  if (is_one_layer_call) then
+    do ll = search_bottom, plev
+      tpad(ll)  = surftmp
+      wpad(ll)  = 0.0
+      ozpad(ll) = 0.0
+    end do
+  else
+    do ll = imisr, plev
+      tpad(ll)  = tmisr
+      wpad(ll)  = 0.0
+      ozpad(ll) = 0.0
+    end do
+  end if
   dbg_tmisr = tmisr
   dbg_tpad = tpad
   dbg_wpad = wpad
@@ -542,15 +569,31 @@ subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp,
   ! 2.  Clear / cloudy radiances and reference terms  -----------------------------
   do k = 1, nbct - 1
      robs(k) = modis_planck_shift( tcold(k), mbnds(k), 0 )
-  
-     rclr(k) = fm_modrad_emis( tmisr, 1.0, pp(imisr), pp, tpad, &
-                               taup(1,k), mbnds(k), imisr )
+
+     ! In one-layer reference mode, the lower boundary is the physical surface,
+     ! so use surface skin temperature and channel-specific surface emissivity.
+     ! In two-layer MM mode, the lower boundary is the MISR lower cloud, assumed
+     ! optically thick/black, so use emissivity = 1.0.
+     if (is_one_layer_call) then
+        lower_temp = surftmp
+        lower_pres = psfc
+        lower_idx  = isp
+        lower_emis = sfc_emis(k)
+     else
+        lower_temp = tmisr
+        lower_pres = pp(imisr)
+        lower_idx  = imisr
+        lower_emis = 1.0
+     end if
+
+     rclr(k) = fm_modrad_emis(lower_temp, lower_emis, lower_pres, pp, tpad, &
+                              taup(1,k), mbnds(k), lower_idx)
   
      delr(k) = robs(k) - rclr(k)
   
      ! --- accumulate RHS integral from Pl up to TOA -----------------------------
      sum = 0.0
-     do ll = imisr-2, 1, -1
+     do ll = search_bottom-1, 1, -1
         db  = modis_planck_shift( tpad(ll+1), mbnds(k), 0 ) - &
               modis_planck_shift( tpad(ll  ), mbnds(k), 0 )
         sum = sum + 0.5 * ( taup(ll+1,k) + taup(ll,k) ) * db
@@ -589,7 +632,11 @@ subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp,
      start = .false.
      valid_ratio = .false.
   
-     do ll = ltrp, imisr              ! search downward until the MISR layer
+     do ll = ltrp, search_bottom - 1
+        if ((.not. ieee_is_finite(ra(ll,k1))) .or. &
+            (.not. ieee_is_finite(ra(ll,k2)))) cycle
+        if (ra(ll,k1) <= -900.0 .or. &
+            ra(ll,k2) <= -900.0) cycle
         if (delr(k2) == 0.0  .or. ra(ll,k2) == 0.0) cycle     ! avoid /0
   
         fm1 = delr(k1)              / delr(k2)
@@ -612,7 +659,7 @@ subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp,
      if (ok) then
         krto(id) = 1
         lev(id)  = max( 2, min( plev, int(lev(id)) ) )
-        ctp_pres(id) = pp(int(lev(id))-1)
+        ctp_pres(id) = pp(int(lev(id)))
         dbg_pair_status(id) = pair_crossing_found
      else
         krto(id)     = 0
@@ -656,7 +703,7 @@ subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp,
       if (id == 1 .and. ctp_pres(id) < 450.0 .and. ctp_pres(id) < misr_ctp) then
         ! Band pair 36/35
         ipco2 = id
-        lco2 = nint(lev(id)-1)
+        lco2 = nint(lev(id))
         pfco2 = ctp_pres(id)
         found_solution = .true.
         Cloud_Top_Pressure = pp(lco2) 
@@ -668,7 +715,7 @@ subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp,
         if  ( ctp_pres(1)  == badvalue .or. ctp_pres(id) < ctp_pres(1)  ) then
           ! Band pair 35/33
           ipco2 = id
-          lco2  = nint(lev(id)-1)
+          lco2  = nint(lev(id))
           pfco2 = ctp_pres(id)
           found_solution = .true.
           Cloud_Top_Pressure = pp(lco2)
@@ -741,8 +788,25 @@ subroutine co2cld_onepixel_misr_reason(wprof, tprof, hprof, psfc, pmsl, surftmp,
     ll  = lco2                  ! level index of selected upper cloud
     
     robs(5) = modis_planck( tcold(kwc), mbnds(kwc), 0 )
-    rclr(5) = fm_modrad_emis( tmisr, 1.0, pp(imisr), pp, tpad, &
-                               taup(1,kwc), mbnds(kwc), imisr )
+
+    ! In one-layer reference mode, the lower boundary is the physical surface,
+    ! so use surface skin temperature and channel-specific surface emissivity.
+    ! In two-layer MM mode, the lower boundary is the MISR lower cloud, assumed
+    ! optically thick/black, so use emissivity = 1.0.
+    if (is_one_layer_call) then
+       lower_temp = surftmp
+       lower_pres = psfc
+       lower_idx  = isp
+       lower_emis = sfc_emis(kwc)
+    else
+       lower_temp = tmisr
+       lower_pres = pp(imisr)
+       lower_idx  = imisr
+       lower_emis = 1.0
+    end if
+
+    rclr(5) = fm_modrad_emis(lower_temp, lower_emis, lower_pres, pp, tpad, &
+                             taup(1,kwc), mbnds(kwc), lower_idx)
   
     delr(5) = robs(5) - rclr(5)
     rwcld = fm_modrad_emis( tpad(lco2), emisrw, pp(lco2),  pp, tpad, taup(1,kwc), &
@@ -1039,13 +1103,14 @@ subroutine get_clearsky_bias(wprof, tprof, psfc, surftmp, view, rlat, landsea,  
 
 end subroutine get_clearsky_bias
 
-subroutine compute_multilayer_score(mod_cth_final, misr_cth_final, &
+subroutine compute_multilayer_score(mod_cth_final, misr_cth_final, mod_method, &
                                     badvalue_in, z_single, ml_flag)
   use, intrinsic :: ieee_arithmetic
   implicit none
 
   real,    intent(in)  :: mod_cth_final
   real,    intent(in)  :: misr_cth_final
+  integer, intent(in)  :: mod_method
   real,    intent(in)  :: badvalue_in
   real,    intent(out) :: z_single
   integer, intent(out) :: ml_flag
@@ -1063,27 +1128,31 @@ subroutine compute_multilayer_score(mod_cth_final, misr_cth_final, &
   if (misr_cth_final <= -500.0 .or. misr_cth_final > max_valid_cth) return
   if (mod_cth_final <= 0.0 .or. mod_cth_final > max_valid_cth) return
 
-  ! 3.5*MAD-filtered calibration constants, units = meters.
+  ! Primary CATS single-layer calibration: one-pass 3.5*MAD, units = meters.
+  ! Source: mmcth_validate/cats/method_calibration_robust/group_statistics.csv.
   ! D = MODIS_CTH - MISR_CTH.
-  if (misr_cth_final > 4000.0) then
-    mu_single    = -349.0
-    sigma_single = 1971.1
-  else
-    mu_single    = -241.0
-    sigma_single = 676.1
-  end if
+  select case (mod_method)
+  case (1, 2, 3, 4)  ! CO2 slicing; includes 1 = 36/35 and 3 = 35/33.
+    mu_single    = 671.8626198083067
+    sigma_single = 1736.1233108439494
+  case (6)          ! BT / IR window, band 31.
+    mu_single    = -215.9614778497636
+    sigma_single = 659.7612470327214
+  case default      ! Missing or unsupported retrieval method: not evaluated.
+    return
+  end select
 
   if (sigma_single <= 0.0) return
 
   d_cth = mod_cth_final - misr_cth_final
   z_single = (d_cth - mu_single) / sigma_single
 
-  ! One-sided multilayer evidence flag:
+  ! One-sided multilayer evidence flag (nominal normal quantiles, not probabilities):
   ! 0 = not evaluated
-  ! 1 = weak_or_no_evidence, confidence < 90%, Z < 1.2816
-  ! 2 = moderate_evidence,  90% <= confidence < 95%, 1.2816 <= Z < 1.6449
-  ! 3 = strong_evidence,    95% <= confidence < 99%, 1.6449 <= Z < 2.3263
-  ! 4 = very_strong_evidence, confidence >= 99%, Z >= 2.3263
+  ! 1 = weak_or_no_evidence, Z < Z90 (1.2816)
+  ! 2 = moderate_evidence,  Z90 <= Z < Z95 (1.6449)
+  ! 3 = strong_evidence,    Z95 <= Z < Z99 (2.3263)
+  ! 4 = very_strong_evidence, Z >= Z99
 
   if (z_single < 1.2816) then
     ml_flag = 1
@@ -1240,14 +1309,14 @@ subroutine process_selected_pixels(wprof, tprof, hprof, psfc, pmsl, surftmp, &
   real :: Cloud_Top_Pressure_pix, Cloud_Top_Height_pix, Cloud_Optical_Depth_pix
   real :: Cloud_Effective_Emissivity_pix
   integer :: Processing_Mask_pix, Failure_Reason_pix
-  integer :: multilayer_thresold  ! currently equals to 3; only 95% confidence is considered two-layer 
+  integer :: multilayer_thresold  ! Flag >= 3 uses the nominal Z95 cutoff (Z >= 1.6449).
 
   integer :: pix, i, k
   real    :: bias_w_um(nbct)
   integer :: n_used(nbct)
   logical :: use_bias
   logical :: mm_failed
-  logical :: misr_cth_valid, mod_cth_valid
+  logical :: misr_cth_valid, misr_ctp_valid, mod_cth_valid
   logical :: misr_ctp_was_invalid, ref_has_ctp, cand_has_ctp_digit
   integer :: digit1, digit2, ref_digit1, ref_digit2
   integer :: mm_reason
@@ -1336,7 +1405,11 @@ subroutine process_selected_pixels(wprof, tprof, hprof, psfc, pmsl, surftmp, &
       met_date_pix= met_date
 
       misr_cth_valid = ieee_is_finite(misr_cth_pix) .and. &
-                       misr_cth_pix > -500.0 .and. misr_cth_pix <= max_valid_cth
+                       misr_cth_pix >= -500.0 .and. misr_cth_pix <= max_valid_cth
+      misr_ctp_valid = ieee_is_finite(misr_ctp_pix) .and. &
+                       misr_ctp_pix >= pp(1) .and. misr_ctp_pix <= psfc_pix .and. &
+                       misr_ctp_pix <= 1100.0 .and. &
+                       ieee_is_finite(psfc_pix) .and. psfc_pix > pp(1)
       mod_cth_valid = ieee_is_finite(mod_cth_pix) .and. &
                       mod_cth_pix >= 0.0 .and. mod_cth_pix <= max_valid_cth
 
@@ -1360,6 +1433,24 @@ subroutine process_selected_pixels(wprof, tprof, hprof, psfc, pmsl, surftmp, &
         MM_FailureReason(pix)           = mm_not_attempted
         cycle
       end if
+      if (.not. misr_ctp_valid) then
+        if (mod_cth_valid) then
+          Cloud_Top_Pressure(pix)         = mod_ctp_pix
+          Cloud_Top_Height(pix)           = mod_cth_pix
+          Cloud_Effective_Emissivity(pix) = mod_emi(pix)
+          Cloud_Optical_Depth(pix)        = mod_opt(pix)
+          Processing_Mask(pix)            = 1
+        else
+          Cloud_Top_Pressure(pix)         = -9999.0
+          Cloud_Top_Height(pix)           = -9999.0
+          Cloud_Effective_Emissivity(pix) = -9999.0
+          Cloud_Optical_Depth(pix)        = -9999.0
+          Processing_Mask(pix)            = 0
+        end if
+        Multilayer_flag(pix)              = 0
+        MM_FailureReason(pix)             = mm_invalid_misr_ctp
+        cycle
+      end if
       if (.not. mod_cth_valid) then
         Cloud_Top_Pressure(pix)         = misr_ctp_pix
         Cloud_Top_Height(pix)           = misr_cth_pix
@@ -1374,7 +1465,7 @@ subroutine process_selected_pixels(wprof, tprof, hprof, psfc, pmsl, surftmp, &
 !#      if ((mod_cth_pix - misr_cth_pix) <= 1000.0 .or. mod_method_pix >= 5 .or. misr_ctp_pix <= 700.0) then
 !# Turn off everything for testing on Mar 26, 2026, Should turn back on with fixes
 
-      call compute_multilayer_score(mod_cth_pix, misr_cth_pix, &
+      call compute_multilayer_score(mod_cth_pix, misr_cth_pix, mod_method_pix, &
                               badvalue, Multilayer_ZScore(pix), Multilayer_flag(pix))
 
       if (mod_cth_pix < misr_cth_pix) then
@@ -1432,7 +1523,7 @@ subroutine process_selected_pixels(wprof, tprof, hprof, psfc, pmsl, surftmp, &
                                 Processing_Mask_pix, Failure_Reason_pix)
 
       Cloud_Top_Pressure(pix)         = Cloud_Top_Pressure_pix
-      Cloud_Top_Height(pix)           = Cloud_Top_Height_pix
+      Cloud_Top_Height(pix)           = Cloud_Top_Height_pix * 1000.0
       Cloud_Effective_Emissivity(pix) = Cloud_Effective_Emissivity_pix
       Cloud_Optical_Depth(pix)        = Cloud_Optical_Depth_pix
       Processing_Mask(pix)            = Processing_Mask_pix
@@ -1570,19 +1661,24 @@ subroutine height_to_log_pressure(geo_height, misr_cth, rows, cols, pressure_at_
     do i = 1, rows
         do j = 1, cols
             ! Skip invalid misr_cth values
-            if (misr_cth(i, j) < 0) cycle
+            if (misr_cth(i, j) < -0.5 .or. misr_cth(i, j) /= misr_cth(i, j)) cycle
 
             ! Find the interpolation levels for each pixel
             do k = 1, num_levels-1
-                if (misr_cth(i, j) <= geo_height(k, i, j) .and. misr_cth(i, j) >= geo_height(k+1, i, j)) then
-                    h_below = geo_height(k, i, j)
-                    h_above = geo_height(k+1, i, j)
+                h_below = geo_height(k, i, j)
+                h_above = geo_height(k+1, i, j)
+                if (h_below /= h_below .or. h_above /= h_above) cycle
+                if (h_below <= -900.0 .or. h_above <= -900.0) cycle
+                if (abs(h_above - h_below) <= 1.0d-8) cycle
+
+                if (misr_cth(i, j) <= h_below .and. misr_cth(i, j) >= h_above) then
                     p_below = log_press(k)
                     p_above = log_press(k+1)
 
                     ! Perform linear interpolation
                     interp_log_p = p_below + (misr_cth(i, j) - h_below) * (p_above - p_below) / (h_above - h_below)
                     pressure_at_cth(i, j) = exp(interp_log_p)
+                    exit
                 end if
             end do
 

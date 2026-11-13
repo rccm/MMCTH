@@ -42,8 +42,7 @@ real(4), intent(inout) :: Z_modis(:,:,:)
 
 ! local variables
 integer :: num_era5_levels, num_modis_levels, lat_size, lon_size
-integer :: i, j, k,insert_pos,ilev
-real :: lowest_pressure  
+integer :: i, j, k, insert_pos, ilev
 real(4), allocatable :: log_interp_levels(:)
 real(4), allocatable :: log_modis_levels(:)
 real(4), allocatable :: T_values(:)
@@ -83,6 +82,13 @@ end do
 ! Loop over each spatial location (latitude and longitude)
 do j = 1, lat_size
   do k = 1, lon_size
+    if (surface_pressures(j, k) <= 0.0 .or. surface_pressures(j, k) /= surface_pressures(j, k)) then
+      T_modis(:, j, k) = -999.0
+      W_modis(:, j, k) = -999.0
+      Z_modis(:, j, k) = -999.0
+      cycle
+    end if
+
     ! Select the appropriate surface temperature
     surface_T = T_sst(j, k)
     if (surface_T < 0.0 .or. surface_T /= surface_T) then
@@ -91,7 +97,7 @@ do j = 1, lat_size
     ! Combine ERA5 levels and surface pressure into one array
     insert_pos = num_era5_levels + 1
     do ilev = 1, num_era5_levels
-      if (surface_pressures(j, k) >= era5_levels(i)) then
+      if (surface_pressures(j, k) <= era5_levels(ilev)) then
         insert_pos = ilev ! Position where surface_pressure should be inserted
         exit
       end if
@@ -117,7 +123,7 @@ do j = 1, lat_size
     end if
 
     Z_values(1:insert_pos-1) = Z_era5(1:insert_pos-1, j, k)
-    Z_values(insert_pos) = 0.0  ! Surface height
+    Z_values(insert_pos) = 0.0  ! Physical surface boundary
     if (insert_pos <= num_era5_levels) then
       Z_values(insert_pos+1:num_era5_levels+1) = Z_era5(insert_pos:num_era5_levels, j, k)
     end if

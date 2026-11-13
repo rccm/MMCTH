@@ -1,19 +1,22 @@
 #!/bin/bash -l
 #SBATCH -p sesebig
 #SBATCH -J mmcth-time-chunk
-#SBATCH -t 20:00:00
-#SBATCH --ntasks=224
-#SBATCH --ntasks-per-node=8
-#SBATCH --cpus-per-task=1
+#SBATCH -t 39:00:00
+
 #SBATCH --constraint=m256
-#SBATCH --exclude=keeling-g17 #keeling-g18,keeling-j22
+#SBATCH --ntasks=207
+#SBATCH --ntasks-per-node=23
+#SBATCH --cpus-per-task=1
+
+
+##SBATCH --exclude=keeling-g17 #keeling-g18,keeling-j22
 #SBATCH --mem=0                 # all memory on each node
 #SBATCH --exclusive
 #SBATCH --mail-type=FAIL,END
 #SBATCH --mail-user=gzhao1@illinois.edu
 #SBATCH -o slurm_create_dataset_%A_%a.out
 #SBATCH -e slurm_create_dataset_%A_%a.err
-#SBATCH --array=0-1           # Adjust based on how many 5-month chunks you need
+#SBATCH --array=0-9         # Adjust based on how many 5-month chunks you need
 
 source /etc/profile.d/modules.sh
 module purge
@@ -28,9 +31,14 @@ export MKL_NUM_THREADS=1
 # export NUMEXPR_NUM_THREADS=1
 export HDF5_USE_FILE_LOCKING=FALSE
 
-PROJECT_DIR="/data/gdi/f/gzhao1/mmcth"
-MAIN_SCRIPT="$PROJECT_DIR/main.py"
-OUTPUT_ROOT="$PROJECT_DIR/ds_output"
+PROJECT_DIR="${PROJECT_DIR:-/data/gdi/f/gzhao1/mmcth}"
+MAIN_SCRIPT="${MAIN_SCRIPT:-$PROJECT_DIR/main.py}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_DIR/ds_output}"
+
+# Each MPI rank creates JSON immediately after its NetCDF closes; set to 0 to disable.
+export CREATE_JSON_METADATA="${CREATE_JSON_METADATA:-1}"
+export METADATA_SCRIPT="${METADATA_SCRIPT:-$PROJECT_DIR/metadata/creat_json.py}"
+export MOD03_ROOT="${MOD03_ROOT:-/data/gdi/satellite/TerraDataArchive/MODIS/MOD03}"
 
 if [[ ! -r "$MAIN_SCRIPT" ]]; then
   echo "ERROR: main.py is not readable at $MAIN_SCRIPT on $(hostname)" >&2
@@ -38,7 +46,8 @@ if [[ ! -r "$MAIN_SCRIPT" ]]; then
 fi
 
 # Calculate start and end dates for each job array task
-BASE_DATE="2015-01-01"
+
+BASE_DATE="2005-01-01"
 MONTHS_PER_CHUNK=6
 
 # Calculate start date for this array task
@@ -58,4 +67,4 @@ echo "Output directory: $OUTPUT_DIR"
 echo "$SLURM_NTASKS" 
 mpirun -np "$SLURM_NTASKS" \
   --mca orte_base_help_aggregate 0 \
-  python "$MAIN_SCRIPT" -s "$START_DATE" -e "$END_DATE" --output-dir "$OUTPUT_DIR"
+  python "$MAIN_SCRIPT" -s "$START_DATE" -e "$END_DATE" --output-dir "$OUTPUT_DIR" --co2-debug
